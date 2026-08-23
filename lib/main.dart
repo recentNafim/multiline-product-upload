@@ -1,6 +1,5 @@
 
 
-
 import 'dart:convert';
 
 import 'package:excel/excel.dart' as xls;
@@ -29,6 +28,7 @@ class MyApp extends StatelessWidget {
       home: const ItemUploadScreen(),
       routes: {
         '/items': (context) => const DisplayRoomItemListPage(),
+        '/delete': (context) => const DisplayRoomDeletePage(),
       },
     );
   }
@@ -1581,6 +1581,16 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
             },
             icon: const Icon(Icons.list_alt_outlined),
           ),
+          IconButton(
+            tooltip: 'Delete Items',
+            onPressed: () {
+              Navigator.pushNamed(context, '/delete');
+            },
+            icon: const Icon(
+              Icons.delete_outline_rounded,
+              color: Colors.redAccent,
+            ),
+          ),
           const SizedBox(width: 8),
         ],
       ),
@@ -2734,6 +2744,16 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
         title: const Text('Display Room Items'),
         actions: [
           IconButton(
+            tooltip: 'Delete Items',
+            onPressed: () {
+              Navigator.pushNamed(context, '/delete');
+            },
+            icon: const Icon(
+              Icons.delete_outline_rounded,
+              color: Colors.redAccent,
+            ),
+          ),
+          IconButton(
             tooltip: 'Refresh',
             onPressed: isLoading ? null : getItems,
             icon: const Icon(Icons.refresh),
@@ -2806,6 +2826,1828 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
     searchController.dispose();
     super.dispose();
   }
+}
+
+// ============================================================================
+// DISPLAY ROOM DELETE PAGE
+// ============================================================================
+
+class DisplayRoomDeletePage extends StatefulWidget {
+  const DisplayRoomDeletePage({super.key});
+
+  @override
+  State<DisplayRoomDeletePage> createState() =>
+      _DisplayRoomDeletePageState();
+}
+
+class _DisplayRoomDeletePageState extends State<DisplayRoomDeletePage> {
+  // --------------------------------------------------------------------------
+  // GET + DELETE use the E501 resource requested for this system.
+  // --------------------------------------------------------------------------
+  static const String apiUrl =
+      'https://e501.sihirbox.com:8071/ords/rpro/'
+      'multiline-display-room/item-upload';
+
+  static const String imageBaseUrl =
+      'https://e501.sihirbox.com:8071/ords/rpro/'
+      'image_service/get/';
+
+  final TextEditingController searchController =
+  TextEditingController();
+
+  bool isLoading = false;
+  String? deletingKey;
+
+  List<_DeleteProductRow> products = [];
+  List<_DeleteProductRow> filteredProducts = [];
+
+  List<_DeleteMasterRow> masters = [];
+  List<_DeleteMasterRow> filteredMasters = [];
+
+  @override
+  void initState() {
+    super.initState();
+    searchController.addListener(_applyFilter);
+    _loadDeleteData();
+  }
+
+  // ==========================================================================
+  // LOAD GET DATA
+  // ==========================================================================
+
+  Future<void> _loadDeleteData() async {
+    if (isLoading) {
+      return;
+    }
+
+    setState(() {
+      isLoading = true;
+    });
+
+    try {
+      final response = await http
+          .get(
+        Uri.parse(apiUrl),
+        headers: const {
+          'Accept': 'application/json',
+        },
+      )
+          .timeout(
+        const Duration(seconds: 60),
+      );
+
+      debugPrint('==========================================');
+      debugPrint('DELETE PAGE GET');
+      debugPrint('URL => $apiUrl');
+      debugPrint('STATUS => ${response.statusCode}');
+      debugPrint('==========================================');
+
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300) {
+        throw Exception(
+          'HTTP ${response.statusCode}: ${response.body}',
+        );
+      }
+
+      final dynamic decoded =
+      jsonDecode(response.body);
+
+      final parsed =
+      _parseDeleteResponse(decoded);
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        products = parsed.products;
+        masters = parsed.masters;
+      });
+
+      _applyFilter();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(
+        'Delete page data load failed: $e',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isLoading = false;
+        });
+      }
+    }
+  }
+
+  // ==========================================================================
+  // PARSE API RESPONSE
+  //
+  // Supports the current nested response:
+  //
+  // data: [
+  //   {
+  //     sl: MASTER_SL,
+  //     ...
+  //     details: [
+  //       {
+  //         sl: DETAIL_SL,
+  //         ...
+  //         images: [...]
+  //       }
+  //     ]
+  //   }
+  // ]
+  //
+  // Also supports a flat list for backward compatibility.
+  // ==========================================================================
+
+  _DeleteParsedData _parseDeleteResponse(
+      dynamic decoded,
+      ) {
+    final List<_DeleteProductRow> productRows = [];
+    final List<_DeleteMasterRow> masterRows = [];
+
+    List<dynamic> rootList = [];
+
+    if (decoded is List) {
+      rootList = decoded;
+    } else if (decoded is Map) {
+      const possibleKeys = [
+        'data',
+        'DATA',
+        'items',
+        'ITEMS',
+        'item_list',
+        'ITEM_LIST',
+      ];
+
+      for (final key in possibleKeys) {
+        if (decoded[key] is List) {
+          rootList =
+          List<dynamic>.from(decoded[key]);
+          break;
+        }
+      }
+    }
+
+    for (final dynamic raw in rootList) {
+      if (raw is! Map) {
+        continue;
+      }
+
+      final Map<String, dynamic> master =
+      Map<String, dynamic>.from(raw);
+
+      final dynamic detailsRaw =
+          master['details'] ??
+              master['DETAILS'];
+
+      // ----------------------------------------------------------------------
+      // NESTED MASTER + DETAILS RESPONSE
+      // ----------------------------------------------------------------------
+      if (detailsRaw is List) {
+        final int? masterSl = _asInt(
+          master['sl'] ??
+              master['SL'] ??
+              master['master_sl'] ??
+              master['MASTER_SL'],
+        );
+
+        final String business =
+        _asText(
+          master['business'] ??
+              master['BUSINESS'],
+        );
+
+        final String subCategory =
+        _asText(
+          master['sub_category'] ??
+              master['SUB_CATEGORY'],
+        );
+
+        final String displayRoomNo =
+        _asText(
+          master['display_room_no'] ??
+              master['DISPLAY_ROOM_NO'],
+        );
+
+        final String displayRoomName =
+        _asText(
+          master['display_room_name'] ??
+              master['DISPLAY_ROOM_NAME'],
+        );
+
+        final String organizationCode =
+        _asText(
+          master['organization_code'] ??
+              master['ORGANIZATION_CODE'],
+        );
+
+        final int? organizationId =
+        _asInt(
+          master['organization_id'] ??
+              master['ORGANIZATION_ID'],
+        );
+
+        final String status =
+        _asText(
+          master['status'] ??
+              master['STATUS'],
+        );
+
+        masterRows.add(
+          _DeleteMasterRow(
+            masterSl: masterSl,
+            business: business,
+            subCategory: subCategory,
+            displayRoomNo: displayRoomNo,
+            displayRoomName: displayRoomName,
+            organizationCode:
+            organizationCode,
+            organizationId:
+            organizationId,
+            status: status,
+            detailsCount:
+            detailsRaw.length,
+          ),
+        );
+
+        for (final dynamic detailRaw
+        in detailsRaw) {
+          if (detailRaw is! Map) {
+            continue;
+          }
+
+          final Map<String, dynamic> detail =
+          Map<String, dynamic>.from(
+            detailRaw,
+          );
+
+          productRows.add(
+            _DeleteProductRow(
+              detailSl: _asInt(
+                detail['sl'] ??
+                    detail['SL'] ??
+                    detail['detail_sl'] ??
+                    detail['DETAIL_SL'],
+              ),
+              masterSl: _asInt(
+                detail['m_sl'] ??
+                    detail['M_SL'] ??
+                    detail['master_sl'] ??
+                    detail['MASTER_SL'],
+              ) ??
+                  masterSl,
+              itemCode: _asText(
+                detail['item_code'] ??
+                    detail['ITEM_CODE'],
+              ),
+              description: _asText(
+                detail['description'] ??
+                    detail['DESCRIPTION'],
+              ),
+              productCategory: _asText(
+                detail['product_category'] ??
+                    detail['PRODUCT_CATEGORY'],
+              ),
+              business: _asText(
+                detail['business'] ??
+                    detail['BUSINESS'],
+              ).isNotEmpty
+                  ? _asText(
+                detail['business'] ??
+                    detail['BUSINESS'],
+              )
+                  : business,
+              subCategory: _asText(
+                detail['sub_category'] ??
+                    detail['SUB_CATEGORY'],
+              ).isNotEmpty
+                  ? _asText(
+                detail['sub_category'] ??
+                    detail['SUB_CATEGORY'],
+              )
+                  : subCategory,
+              displayRoomNo: _asText(
+                detail['display_room_no'] ??
+                    detail['DISPLAY_ROOM_NO'],
+              ).isNotEmpty
+                  ? _asText(
+                detail['display_room_no'] ??
+                    detail['DISPLAY_ROOM_NO'],
+              )
+                  : displayRoomNo,
+              displayRoomName: _asText(
+                detail['display_room_name'] ??
+                    detail['DISPLAY_ROOM_NAME'],
+              ).isNotEmpty
+                  ? _asText(
+                detail['display_room_name'] ??
+                    detail['DISPLAY_ROOM_NAME'],
+              )
+                  : displayRoomName,
+              imageUrl:
+              _firstImageUrl(detail),
+            ),
+          );
+        }
+
+        continue;
+      }
+
+      // ----------------------------------------------------------------------
+      // FLAT DETAIL RESPONSE FALLBACK
+      // ----------------------------------------------------------------------
+      final int? detailSl = _asInt(
+        master['sl'] ??
+            master['SL'] ??
+            master['detail_sl'] ??
+            master['DETAIL_SL'],
+      );
+
+      final int? masterSl = _asInt(
+        master['m_sl'] ??
+            master['M_SL'] ??
+            master['master_sl'] ??
+            master['MASTER_SL'],
+      );
+
+      productRows.add(
+        _DeleteProductRow(
+          detailSl: detailSl,
+          masterSl: masterSl,
+          itemCode: _asText(
+            master['item_code'] ??
+                master['ITEM_CODE'],
+          ),
+          description: _asText(
+            master['description'] ??
+                master['DESCRIPTION'],
+          ),
+          productCategory: _asText(
+            master['product_category'] ??
+                master['PRODUCT_CATEGORY'],
+          ),
+          business: _asText(
+            master['business'] ??
+                master['BUSINESS'],
+          ),
+          subCategory: _asText(
+            master['sub_category'] ??
+                master['SUB_CATEGORY'],
+          ),
+          displayRoomNo: _asText(
+            master['display_room_no'] ??
+                master['DISPLAY_ROOM_NO'],
+          ),
+          displayRoomName: _asText(
+            master['display_room_name'] ??
+                master['DISPLAY_ROOM_NAME'],
+          ),
+          imageUrl:
+          _firstImageUrl(master),
+        ),
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // If flat response had no master list, derive masters from product rows.
+    // ------------------------------------------------------------------------
+    if (masterRows.isEmpty) {
+      final Map<int, List<_DeleteProductRow>>
+      grouped = {};
+
+      for (final item in productRows) {
+        if (item.masterSl == null) {
+          continue;
+        }
+
+        grouped
+            .putIfAbsent(
+          item.masterSl!,
+              () => [],
+        )
+            .add(item);
+      }
+
+      for (final entry in grouped.entries) {
+        final first =
+            entry.value.first;
+
+        masterRows.add(
+          _DeleteMasterRow(
+            masterSl: entry.key,
+            business: first.business,
+            subCategory:
+            first.subCategory,
+            displayRoomNo:
+            first.displayRoomNo,
+            displayRoomName:
+            first.displayRoomName,
+            organizationCode: '',
+            organizationId: null,
+            status: '',
+            detailsCount:
+            entry.value.length,
+          ),
+        );
+      }
+    }
+
+    return _DeleteParsedData(
+      products: productRows,
+      masters: masterRows,
+    );
+  }
+
+  // ==========================================================================
+  // IMAGE URL
+  // ==========================================================================
+
+  String _firstImageUrl(
+      Map<String, dynamic> data,
+      ) {
+    String normalize(dynamic value) {
+      if (value == null) {
+        return '';
+      }
+
+      String url =
+      value.toString().trim();
+
+      if (url.isEmpty ||
+          url.toLowerCase() == 'null') {
+        return '';
+      }
+
+      if (url.startsWith('http://') ||
+          url.startsWith('https://')) {
+        return url;
+      }
+
+      while (url.startsWith('/')) {
+        url = url.substring(1);
+      }
+
+      if (url.isEmpty) {
+        return '';
+      }
+
+      return '$imageBaseUrl'
+          '${Uri.encodeComponent(url)}';
+    }
+
+    String url = normalize(
+      data['image_url'] ??
+          data['IMAGE_URL'],
+    );
+
+    if (url.isNotEmpty) {
+      return url;
+    }
+
+    url = normalize(
+      data['file_url'] ??
+          data['FILE_URL'],
+    );
+
+    if (url.isNotEmpty) {
+      return url;
+    }
+
+    final dynamic images =
+        data['images'] ??
+            data['IMAGES'];
+
+    if (images is List) {
+      for (final dynamic image
+      in images) {
+        if (image is! Map) {
+          continue;
+        }
+
+        url = normalize(
+          image['image_url'] ??
+              image['IMAGE_URL'] ??
+              image['file_url'] ??
+              image['FILE_URL'],
+        );
+
+        if (url.isNotEmpty) {
+          return url;
+        }
+      }
+    }
+
+    return '';
+  }
+
+  // ==========================================================================
+  // FILTER
+  // ==========================================================================
+
+  void _applyFilter() {
+    if (!mounted) {
+      return;
+    }
+
+    final String query =
+    searchController.text
+        .trim()
+        .toLowerCase();
+
+    setState(() {
+      if (query.isEmpty) {
+        filteredProducts =
+        List<_DeleteProductRow>.from(
+          products,
+        );
+
+        filteredMasters =
+        List<_DeleteMasterRow>.from(
+          masters,
+        );
+
+        return;
+      }
+
+      filteredProducts =
+          products.where((item) {
+            return item.itemCode
+                .toLowerCase()
+                .contains(query) ||
+                item.description
+                    .toLowerCase()
+                    .contains(query) ||
+                item.productCategory
+                    .toLowerCase()
+                    .contains(query) ||
+                item.business
+                    .toLowerCase()
+                    .contains(query) ||
+                item.subCategory
+                    .toLowerCase()
+                    .contains(query) ||
+                item.displayRoomNo
+                    .toLowerCase()
+                    .contains(query) ||
+                item.displayRoomName
+                    .toLowerCase()
+                    .contains(query) ||
+                (item.detailSl
+                    ?.toString()
+                    .contains(query) ??
+                    false) ||
+                (item.masterSl
+                    ?.toString()
+                    .contains(query) ??
+                    false);
+          }).toList();
+
+      filteredMasters =
+          masters.where((item) {
+            return item.business
+                .toLowerCase()
+                .contains(query) ||
+                item.subCategory
+                    .toLowerCase()
+                    .contains(query) ||
+                item.displayRoomNo
+                    .toLowerCase()
+                    .contains(query) ||
+                item.displayRoomName
+                    .toLowerCase()
+                    .contains(query) ||
+                item.organizationCode
+                    .toLowerCase()
+                    .contains(query) ||
+                (item.organizationId
+                    ?.toString()
+                    .contains(query) ??
+                    false) ||
+                (item.masterSl
+                    ?.toString()
+                    .contains(query) ??
+                    false);
+          }).toList();
+    });
+  }
+
+  // ==========================================================================
+  // DELETE SINGLE PRODUCT
+  // ==========================================================================
+
+  Future<void> _confirmDeleteProduct(
+      _DeleteProductRow item,
+      ) async {
+    if (item.detailSl == null) {
+      _showMessage(
+        'এই item-এর DETAILS.SL পাওয়া যায়নি। Delete করা যাবে না।',
+        isError: true,
+      );
+      return;
+    }
+
+    final bool? confirmed =
+    await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          icon: const Icon(
+            Icons.warning_amber_rounded,
+            color: Colors.redAccent,
+            size: 34,
+          ),
+          title: const Text(
+            'Delete Product?',
+          ),
+          content: Text(
+            'Item Code: '
+                '${item.itemCode.isEmpty ? '-' : item.itemCode}\n'
+                'Description: '
+                '${item.description.isEmpty ? '-' : item.description}\n'
+                'Detail SL: ${item.detailSl}\n\n'
+                'এই product এবং এর সব uploaded image permanently delete হবে.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext)
+                    .pop(false);
+              },
+              child: const Text(
+                'Cancel',
+              ),
+            ),
+            FilledButton.icon(
+              style:
+              FilledButton.styleFrom(
+                backgroundColor:
+                Colors.redAccent,
+                foregroundColor:
+                Colors.white,
+              ),
+              onPressed: () {
+                Navigator.of(dialogContext)
+                    .pop(true);
+              },
+              icon: const Icon(
+                Icons.delete_forever_outlined,
+              ),
+              label: const Text(
+                'Delete',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    await _deleteProduct(item);
+  }
+
+  Future<void> _deleteProduct(
+      _DeleteProductRow item,
+      ) async {
+    final int detailSl =
+    item.detailSl!;
+
+    final String key =
+        'detail_$detailSl';
+
+    if (deletingKey != null) {
+      return;
+    }
+
+    setState(() {
+      deletingKey = key;
+    });
+
+    try {
+      final Uri uri =
+      Uri.parse(apiUrl).replace(
+        queryParameters: {
+          'p_detail_sl':
+          detailSl.toString(),
+        },
+      );
+
+      debugPrint('==========================================');
+      debugPrint('DELETE PRODUCT');
+      debugPrint('URL => $uri');
+      debugPrint('DETAIL SL => $detailSl');
+      debugPrint('==========================================');
+
+      final response = await http
+          .delete(
+        uri,
+        headers: const {
+          'Accept': 'application/json',
+        },
+      )
+          .timeout(
+        const Duration(seconds: 60),
+      );
+
+      debugPrint(
+        'DELETE STATUS => ${response.statusCode}',
+      );
+      debugPrint(
+        'DELETE RESPONSE => ${response.body}',
+      );
+
+      dynamic decoded;
+
+      try {
+        decoded =
+            jsonDecode(response.body);
+      } catch (_) {
+        decoded = null;
+      }
+
+      final dynamic apiStatus =
+      decoded is Map
+          ? decoded['status_code']
+          : null;
+
+      final String message =
+      decoded is Map
+          ? decoded['message']
+          ?.toString() ??
+          ''
+          : response.body;
+
+      final bool success =
+          response.statusCode >= 200 &&
+              response.statusCode < 300 &&
+              (
+                  apiStatus == null ||
+                      apiStatus == 200 ||
+                      apiStatus.toString() ==
+                          '200'
+              );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (!success) {
+        _showMessage(
+          message.isEmpty
+              ? 'Delete failed.'
+              : message,
+          isError: true,
+        );
+        return;
+      }
+
+      _showMessage(
+        message.isEmpty
+            ? 'Product deleted successfully.'
+            : message,
+      );
+
+      await _loadDeleteData();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(
+        'Delete failed: $e',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          deletingKey = null;
+        });
+      }
+    }
+  }
+
+  // ==========================================================================
+  // DELETE COMPLETE MASTER
+  // ==========================================================================
+
+  Future<void> _confirmDeleteMaster(
+      _DeleteMasterRow item,
+      ) async {
+    if (item.masterSl == null) {
+      _showMessage(
+        'এই master-এর SL পাওয়া যায়নি। Delete করা যাবে না।',
+        isError: true,
+      );
+      return;
+    }
+
+    final bool? confirmed =
+    await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          icon: const Icon(
+            Icons.warning_amber_rounded,
+            color: Colors.redAccent,
+            size: 36,
+          ),
+          title: const Text(
+            'Delete Entire Master?',
+          ),
+          content: Text(
+            'Master SL: ${item.masterSl}\n'
+                'Display Room: '
+                '${item.displayRoomName.isEmpty ? '-' : item.displayRoomName}\n'
+                'Products: ${item.detailsCount}\n\n'
+                'এতে master record, সব products এবং সব uploaded image permanently delete হবে.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext)
+                    .pop(false);
+              },
+              child: const Text(
+                'Cancel',
+              ),
+            ),
+            FilledButton.icon(
+              style:
+              FilledButton.styleFrom(
+                backgroundColor:
+                Colors.redAccent,
+                foregroundColor:
+                Colors.white,
+              ),
+              onPressed: () {
+                Navigator.of(dialogContext)
+                    .pop(true);
+              },
+              icon: const Icon(
+                Icons.delete_forever_outlined,
+              ),
+              label: const Text(
+                'Delete All',
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    await _deleteMaster(item);
+  }
+
+  Future<void> _deleteMaster(
+      _DeleteMasterRow item,
+      ) async {
+    final int masterSl =
+    item.masterSl!;
+
+    final String key =
+        'master_$masterSl';
+
+    if (deletingKey != null) {
+      return;
+    }
+
+    setState(() {
+      deletingKey = key;
+    });
+
+    try {
+      final Uri uri =
+      Uri.parse(apiUrl).replace(
+        queryParameters: {
+          'p_master_sl':
+          masterSl.toString(),
+        },
+      );
+
+      debugPrint('==========================================');
+      debugPrint('DELETE MASTER');
+      debugPrint('URL => $uri');
+      debugPrint('MASTER SL => $masterSl');
+      debugPrint('==========================================');
+
+      final response = await http
+          .delete(
+        uri,
+        headers: const {
+          'Accept': 'application/json',
+        },
+      )
+          .timeout(
+        const Duration(seconds: 60),
+      );
+
+      debugPrint(
+        'DELETE STATUS => ${response.statusCode}',
+      );
+      debugPrint(
+        'DELETE RESPONSE => ${response.body}',
+      );
+
+      dynamic decoded;
+
+      try {
+        decoded =
+            jsonDecode(response.body);
+      } catch (_) {
+        decoded = null;
+      }
+
+      final dynamic apiStatus =
+      decoded is Map
+          ? decoded['status_code']
+          : null;
+
+      final String message =
+      decoded is Map
+          ? decoded['message']
+          ?.toString() ??
+          ''
+          : response.body;
+
+      final bool success =
+          response.statusCode >= 200 &&
+              response.statusCode < 300 &&
+              (
+                  apiStatus == null ||
+                      apiStatus == 200 ||
+                      apiStatus.toString() ==
+                          '200'
+              );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (!success) {
+        _showMessage(
+          message.isEmpty
+              ? 'Master delete failed.'
+              : message,
+          isError: true,
+        );
+        return;
+      }
+
+      _showMessage(
+        message.isEmpty
+            ? 'Master deleted successfully.'
+            : message,
+      );
+
+      await _loadDeleteData();
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+
+      _showMessage(
+        'Master delete failed: $e',
+        isError: true,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          deletingKey = null;
+        });
+      }
+    }
+  }
+
+  // ==========================================================================
+  // UI HELPERS
+  // ==========================================================================
+
+  Widget _buildProductImage(
+      String imageUrl,
+      ) {
+    if (imageUrl.isEmpty) {
+      return Container(
+        width: 76,
+        height: 76,
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius:
+          BorderRadius.circular(12),
+        ),
+        child: const Icon(
+          Icons.image_not_supported_outlined,
+          color: Colors.grey,
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius:
+      BorderRadius.circular(12),
+      child: Image.network(
+        imageUrl,
+        width: 76,
+        height: 76,
+        fit: BoxFit.cover,
+        errorBuilder: (
+            context,
+            error,
+            stackTrace,
+            ) {
+          return Container(
+            width: 76,
+            height: 76,
+            color:
+            Colors.grey.shade100,
+            alignment:
+            Alignment.center,
+            child: const Icon(
+              Icons.broken_image_outlined,
+              color: Colors.grey,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildProductCard(
+      _DeleteProductRow item,
+      ) {
+    final String key =
+        'detail_${item.detailSl}';
+
+    final bool deleting =
+        deletingKey == key;
+
+    return Card(
+      margin:
+      const EdgeInsets.only(
+        bottom: 12,
+      ),
+      elevation: 0,
+      shape:
+      RoundedRectangleBorder(
+        borderRadius:
+        BorderRadius.circular(16),
+        side: BorderSide(
+          color:
+          Colors.grey.shade300,
+        ),
+      ),
+      child: Padding(
+        padding:
+        const EdgeInsets.all(14),
+        child: Row(
+          crossAxisAlignment:
+          CrossAxisAlignment.start,
+          children: [
+            _buildProductImage(
+              item.imageUrl,
+            ),
+
+            const SizedBox(width: 14),
+
+            Expanded(
+              child: Column(
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.description
+                        .isNotEmpty
+                        ? item.description
+                        : item.itemCode
+                        .isNotEmpty
+                        ? item.itemCode
+                        : 'Unnamed Product',
+                    maxLines: 2,
+                    overflow:
+                    TextOverflow.ellipsis,
+                    style:
+                    const TextStyle(
+                      fontSize: 15,
+                      fontWeight:
+                      FontWeight.w700,
+                    ),
+                  ),
+
+                  const SizedBox(height: 5),
+
+                  Text(
+                    item.itemCode.isEmpty
+                        ? 'Item Code: -'
+                        : 'Item Code: ${item.itemCode}',
+                    style:
+                    TextStyle(
+                      fontSize: 12,
+                      color: Colors
+                          .grey.shade700,
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  Wrap(
+                    spacing: 7,
+                    runSpacing: 6,
+                    children: [
+                      _deleteChip(
+                        'Detail SL: '
+                            '${item.detailSl ?? '-'}',
+                      ),
+                      _deleteChip(
+                        'Master SL: '
+                            '${item.masterSl ?? '-'}',
+                      ),
+                      if (item
+                          .productCategory
+                          .isNotEmpty)
+                        _deleteChip(
+                          item.productCategory,
+                        ),
+                      if (item
+                          .business
+                          .isNotEmpty)
+                        _deleteChip(
+                          item.business,
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(width: 12),
+
+            SizedBox(
+              height: 40,
+              child:
+              FilledButton.icon(
+                style:
+                FilledButton.styleFrom(
+                  backgroundColor:
+                  Colors.redAccent,
+                  foregroundColor:
+                  Colors.white,
+                ),
+                onPressed:
+                deletingKey != null
+                    ? null
+                    : () {
+                  _confirmDeleteProduct(
+                    item,
+                  );
+                },
+                icon: deleting
+                    ? const SizedBox(
+                  width: 17,
+                  height: 17,
+                  child:
+                  CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+                    : const Icon(
+                  Icons
+                      .delete_outline_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  deleting
+                      ? 'Deleting...'
+                      : 'Delete',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMasterCard(
+      _DeleteMasterRow item,
+      ) {
+    final String key =
+        'master_${item.masterSl}';
+
+    final bool deleting =
+        deletingKey == key;
+
+    final String title =
+    item.displayRoomName
+        .isNotEmpty
+        ? item.displayRoomName
+        : item.displayRoomNo
+        .isNotEmpty
+        ? item.displayRoomNo
+        : 'Master '
+        '${item.masterSl ?? '-'}';
+
+    return Card(
+      margin:
+      const EdgeInsets.only(
+        bottom: 12,
+      ),
+      elevation: 0,
+      shape:
+      RoundedRectangleBorder(
+        borderRadius:
+        BorderRadius.circular(16),
+        side: BorderSide(
+          color:
+          Colors.grey.shade300,
+        ),
+      ),
+      child: Padding(
+        padding:
+        const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Container(
+              width: 58,
+              height: 58,
+              decoration:
+              BoxDecoration(
+                color:
+                Colors.red.shade50,
+                borderRadius:
+                BorderRadius
+                    .circular(14),
+              ),
+              child: const Icon(
+                Icons
+                    .delete_sweep_outlined,
+                color:
+                Colors.redAccent,
+                size: 28,
+              ),
+            ),
+
+            const SizedBox(width: 14),
+
+            Expanded(
+              child: Column(
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow:
+                    TextOverflow.ellipsis,
+                    style:
+                    const TextStyle(
+                      fontSize: 16,
+                      fontWeight:
+                      FontWeight.w700,
+                    ),
+                  ),
+
+                  const SizedBox(height: 5),
+
+                  Text(
+                    item.displayRoomNo
+                        .isEmpty
+                        ? 'Master SL: '
+                        '${item.masterSl ?? '-'}'
+                        : item.displayRoomNo,
+                    style:
+                    TextStyle(
+                      fontSize: 12,
+                      color: Colors
+                          .grey.shade700,
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  Wrap(
+                    spacing: 7,
+                    runSpacing: 6,
+                    children: [
+                      _deleteChip(
+                        'Master SL: '
+                            '${item.masterSl ?? '-'}',
+                      ),
+                      _deleteChip(
+                        'Products: '
+                            '${item.detailsCount}',
+                      ),
+                      if (item.business
+                          .isNotEmpty)
+                        _deleteChip(
+                          item.business,
+                        ),
+                      if (item
+                          .organizationCode
+                          .isNotEmpty)
+                        _deleteChip(
+                          item.organizationCode,
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(width: 12),
+
+            SizedBox(
+              height: 40,
+              child:
+              FilledButton.icon(
+                style:
+                FilledButton.styleFrom(
+                  backgroundColor:
+                  Colors.redAccent,
+                  foregroundColor:
+                  Colors.white,
+                ),
+                onPressed:
+                deletingKey != null
+                    ? null
+                    : () {
+                  _confirmDeleteMaster(
+                    item,
+                  );
+                },
+                icon: deleting
+                    ? const SizedBox(
+                  width: 17,
+                  height: 17,
+                  child:
+                  CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+                    : const Icon(
+                  Icons
+                      .delete_forever_outlined,
+                  size: 18,
+                ),
+                label: Text(
+                  deleting
+                      ? 'Deleting...'
+                      : 'Delete All',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _deleteChip(
+      String text,
+      ) {
+    if (text.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding:
+      const EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: 4,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius:
+        BorderRadius.circular(7),
+      ),
+      child: Text(
+        text,
+        style:
+        const TextStyle(
+          fontSize: 11,
+        ),
+      ),
+    );
+  }
+
+  void _showMessage(
+      String message, {
+        bool isError = false,
+      }) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(
+      SnackBar(
+        backgroundColor:
+        isError
+            ? Colors.red
+            : Colors.green,
+        content: Text(message),
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // BUILD
+  // ==========================================================================
+
+  @override
+  Widget build(
+      BuildContext context,
+      ) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title:
+          const Text(
+            'Delete Display Room Data',
+          ),
+          actions: [
+            IconButton(
+              tooltip: 'Refresh',
+              onPressed:
+              isLoading ||
+                  deletingKey !=
+                      null
+                  ? null
+                  : _loadDeleteData,
+              icon: const Icon(
+                Icons.refresh_rounded,
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          bottom:
+          const TabBar(
+            tabs: [
+              Tab(
+                icon: Icon(
+                  Icons
+                      .inventory_2_outlined,
+                ),
+                text: 'Products',
+              ),
+              Tab(
+                icon: Icon(
+                  Icons
+                      .delete_sweep_outlined,
+                ),
+                text: 'Masters',
+              ),
+            ],
+          ),
+        ),
+        body: Column(
+          children: [
+            // ================================================================
+            // WARNING
+            // ================================================================
+            Container(
+              width:
+              double.infinity,
+              margin:
+              const EdgeInsets.fromLTRB(
+                16,
+                16,
+                16,
+                0,
+              ),
+              padding:
+              const EdgeInsets.all(12),
+              decoration:
+              BoxDecoration(
+                color:
+                Colors.red.shade50,
+                borderRadius:
+                BorderRadius
+                    .circular(12),
+                border: Border.all(
+                  color:
+                  Colors.red.shade100,
+                ),
+              ),
+              child: const Row(
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons
+                        .warning_amber_rounded,
+                    color:
+                    Colors.redAccent,
+                  ),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Delete operation permanent. '
+                          'Product delete করলে ওই product + images delete হবে. '
+                          'Master delete করলে master-এর সব products + images delete হবে.',
+                      style:
+                      TextStyle(
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // ================================================================
+            // SEARCH
+            // ================================================================
+            Padding(
+              padding:
+              const EdgeInsets.fromLTRB(
+                16,
+                14,
+                16,
+                10,
+              ),
+              child: TextField(
+                controller:
+                searchController,
+                decoration:
+                InputDecoration(
+                  hintText:
+                  'Search item code, description, room, SL...',
+                  prefixIcon:
+                  const Icon(
+                    Icons.search_rounded,
+                  ),
+                  suffixIcon:
+                  searchController
+                      .text
+                      .isNotEmpty
+                      ? IconButton(
+                    onPressed: () {
+                      searchController
+                          .clear();
+                    },
+                    icon:
+                    const Icon(
+                      Icons
+                          .close_rounded,
+                    ),
+                  )
+                      : null,
+                  border:
+                  OutlineInputBorder(
+                    borderRadius:
+                    BorderRadius
+                        .circular(12),
+                  ),
+                ),
+              ),
+            ),
+
+            Expanded(
+              child: isLoading
+                  ? const Center(
+                child:
+                CircularProgressIndicator(),
+              )
+                  : TabBarView(
+                children: [
+                  // ====================================================
+                  // PRODUCTS
+                  // ====================================================
+                  RefreshIndicator(
+                    onRefresh:
+                    _loadDeleteData,
+                    child:
+                    filteredProducts
+                        .isEmpty
+                        ? ListView(
+                      physics:
+                      const AlwaysScrollableScrollPhysics(),
+                      children:
+                      const [
+                        SizedBox(
+                          height:
+                          180,
+                        ),
+                        Icon(
+                          Icons
+                              .inventory_2_outlined,
+                          size:
+                          60,
+                          color:
+                          Colors.grey,
+                        ),
+                        SizedBox(
+                          height:
+                          12,
+                        ),
+                        Center(
+                          child:
+                          Text(
+                            'No products found.',
+                          ),
+                        ),
+                      ],
+                    )
+                        : ListView
+                        .builder(
+                      physics:
+                      const AlwaysScrollableScrollPhysics(),
+                      padding:
+                      const EdgeInsets.fromLTRB(
+                        16,
+                        0,
+                        16,
+                        30,
+                      ),
+                      itemCount:
+                      filteredProducts.length,
+                      itemBuilder:
+                          (
+                          context,
+                          index,
+                          ) {
+                        return _buildProductCard(
+                          filteredProducts[index],
+                        );
+                      },
+                    ),
+                  ),
+
+                  // ====================================================
+                  // MASTERS
+                  // ====================================================
+                  RefreshIndicator(
+                    onRefresh:
+                    _loadDeleteData,
+                    child:
+                    filteredMasters
+                        .isEmpty
+                        ? ListView(
+                      physics:
+                      const AlwaysScrollableScrollPhysics(),
+                      children:
+                      const [
+                        SizedBox(
+                          height:
+                          180,
+                        ),
+                        Icon(
+                          Icons
+                              .delete_sweep_outlined,
+                          size:
+                          60,
+                          color:
+                          Colors.grey,
+                        ),
+                        SizedBox(
+                          height:
+                          12,
+                        ),
+                        Center(
+                          child:
+                          Text(
+                            'No master records found.',
+                          ),
+                        ),
+                      ],
+                    )
+                        : ListView
+                        .builder(
+                      physics:
+                      const AlwaysScrollableScrollPhysics(),
+                      padding:
+                      const EdgeInsets.fromLTRB(
+                        16,
+                        0,
+                        16,
+                        30,
+                      ),
+                      itemCount:
+                      filteredMasters.length,
+                      itemBuilder:
+                          (
+                          context,
+                          index,
+                          ) {
+                        return _buildMasterCard(
+                          filteredMasters[index],
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    searchController
+        .removeListener(
+      _applyFilter,
+    );
+    searchController.dispose();
+    super.dispose();
+  }
+}
+
+// ============================================================================
+// DELETE PAGE SUPPORT MODELS
+// ============================================================================
+
+class _DeleteParsedData {
+  final List<_DeleteProductRow> products;
+  final List<_DeleteMasterRow> masters;
+
+  const _DeleteParsedData({
+    required this.products,
+    required this.masters,
+  });
+}
+
+class _DeleteProductRow {
+  final int? detailSl;
+  final int? masterSl;
+  final String itemCode;
+  final String description;
+  final String productCategory;
+  final String business;
+  final String subCategory;
+  final String displayRoomNo;
+  final String displayRoomName;
+  final String imageUrl;
+
+  const _DeleteProductRow({
+    required this.detailSl,
+    required this.masterSl,
+    required this.itemCode,
+    required this.description,
+    required this.productCategory,
+    required this.business,
+    required this.subCategory,
+    required this.displayRoomNo,
+    required this.displayRoomName,
+    required this.imageUrl,
+  });
+}
+
+class _DeleteMasterRow {
+  final int? masterSl;
+  final String business;
+  final String subCategory;
+  final String displayRoomNo;
+  final String displayRoomName;
+  final String organizationCode;
+  final int? organizationId;
+  final String status;
+  final int detailsCount;
+
+  const _DeleteMasterRow({
+    required this.masterSl,
+    required this.business,
+    required this.subCategory,
+    required this.displayRoomNo,
+    required this.displayRoomName,
+    required this.organizationCode,
+    required this.organizationId,
+    required this.status,
+    required this.detailsCount,
+  });
+}
+
+String _asText(dynamic value) {
+  return value?.toString().trim() ?? '';
+}
+
+int? _asInt(dynamic value) {
+  if (value == null) {
+    return null;
+  }
+
+  final String text =
+  value.toString().trim();
+
+  if (text.isEmpty) {
+    return null;
+  }
+
+  return int.tryParse(text) ??
+      double.tryParse(text)?.toInt();
 }
 
 class DisplayRoomItem {
