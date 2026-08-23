@@ -1,5 +1,6 @@
 
 
+
 import 'dart:convert';
 
 import 'package:excel/excel.dart' as xls;
@@ -42,9 +43,9 @@ class ItemUploadScreen extends StatefulWidget {
 }
 
 class _ItemUploadScreenState extends State<ItemUploadScreen> {
-  static const String apiUrl =
-      'https://e502.sihirbox.com:8072/ords/rpro/'
-      'multiline-display-room/item-upload';
+  static const String apiUrl = "https://e501.sihirbox.com:8071/ords/rpro/multiline-display-room/item-upload";
+  // 'https://e502.sihirbox.com:8072/ords/rpro/'
+  // 'multiline-display-room/item-upload';
 
   final _formKey = GlobalKey<FormState>();
 
@@ -55,6 +56,20 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
   /// Excel select করলে সব detail এখানে থাকবে।
   List<Map<String, dynamic>> excelDetails = [];
+
+  // ============================================================
+  // IMAGE STATE
+  // ============================================================
+
+  /// Manual item-এর জন্য সর্বোচ্চ 5টি image।
+  final List<PlatformFile> selectedImages = [];
+
+  /// Excel mode-এ IMAGE column-এর filename-এর সাথে match করার জন্য
+  /// একসাথে অনেক image file select করা যাবে। Backend limit প্রতি item-এ 5।
+  final List<PlatformFile> selectedExcelImages = [];
+
+  bool isReadingImages = false;
+  bool isReadingExcelImages = false;
 
   // ============================================================
   // MASTER CONTROLLERS
@@ -208,7 +223,201 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       return 'image/webp';
     }
 
+    if (name.endsWith('.gif')) {
+      return 'image/gif';
+    }
+
     return 'application/octet-stream';
+  }
+
+  // ============================================================
+  // IMAGE HELPERS
+  // ============================================================
+
+  List<String> _imageNamesFromExcelValue(dynamic value) {
+    final text = asText(value);
+
+    if (text.isEmpty) {
+      return <String>[];
+    }
+
+    return text
+        .split(RegExp(r'[,;|\n]'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
+
+  Map<String, dynamic> _platformFileToImageJson(PlatformFile file) {
+    if (file.bytes == null) {
+      throw Exception('${file.name} file-এর bytes পাওয়া যায়নি');
+    }
+
+    return <String, dynamic>{
+      'picture_base64': base64Encode(file.bytes!),
+      'file_name': file.name,
+      'mime_type': mimeTypeFromFileName(file.name),
+    };
+  }
+
+  List<Map<String, dynamic>> _manualImagesPayload() {
+    return selectedImages
+        .where((file) => file.bytes != null)
+        .map(_platformFileToImageJson)
+        .toList();
+  }
+
+  List<Map<String, dynamic>> _excelImagesPayloadForDetail(
+      Map<String, dynamic> detail,
+      ) {
+    final rawNames = detail['_image_names'];
+
+    final List<String> expectedNames = rawNames is List
+        ? rawNames.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList()
+        : _imageNamesFromExcelValue(detail['file_name']);
+
+    if (expectedNames.isEmpty) {
+      return <Map<String, dynamic>>[];
+    }
+
+    final lowerNames = expectedNames.map((e) => e.toLowerCase()).toSet();
+
+    return selectedExcelImages
+        .where(
+          (file) =>
+      file.bytes != null && lowerNames.contains(file.name.toLowerCase()),
+    )
+        .take(5)
+        .map(_platformFileToImageJson)
+        .toList();
+  }
+
+  Future<void> selectManualImages() async {
+    if (selectedImages.length >= 5) {
+      showError('একটি item-এর জন্য সর্বোচ্চ 5টি image select করা যাবে।');
+      return;
+    }
+
+    try {
+      setState(() {
+        isReadingImages = true;
+      });
+
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+        allowMultiple: true,
+        withData: true,
+      );
+
+      if (result == null) {
+        return;
+      }
+
+      final remaining = 5 - selectedImages.length;
+      final validFiles = result.files
+          .where((file) => file.bytes != null)
+          .take(remaining)
+          .toList();
+
+      if (validFiles.isEmpty) {
+        showError('Selected image file read করা যাচ্ছে না।');
+        return;
+      }
+
+      setState(() {
+        selectedImages.addAll(validFiles);
+
+        final first = selectedImages.first;
+        fileNameController.text = first.name;
+        fileUrlController.text = first.name;
+        mimeTypeController.text = mimeTypeFromFileName(first.name);
+      });
+
+      if (result.files.length > remaining) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('সর্বোচ্চ 5টি image নেওয়া হয়েছে। অতিরিক্ত image বাদ দেওয়া হয়েছে।'),
+          ),
+        );
+      }
+    } catch (e) {
+      showError('Image select failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          isReadingImages = false;
+        });
+      }
+    }
+  }
+
+  Future<void> selectExcelImages() async {
+    try {
+      setState(() {
+        isReadingExcelImages = true;
+      });
+
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+        allowMultiple: true,
+        withData: true,
+      );
+
+      if (result == null) {
+        return;
+      }
+
+      final validFiles = result.files.where((file) => file.bytes != null).toList();
+
+      if (validFiles.isEmpty) {
+        showError('Selected image files read করা যাচ্ছে না।');
+        return;
+      }
+
+      final Map<String, PlatformFile> merged = {
+        for (final file in selectedExcelImages) file.name.toLowerCase(): file,
+        for (final file in validFiles) file.name.toLowerCase(): file,
+      };
+
+      setState(() {
+        selectedExcelImages
+          ..clear()
+          ..addAll(merged.values);
+      });
+    } catch (e) {
+      showError('Excel image select failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          isReadingExcelImages = false;
+        });
+      }
+    }
+  }
+
+  void removeManualImage(int index) {
+    setState(() {
+      selectedImages.removeAt(index);
+
+      if (selectedImages.isEmpty) {
+        fileNameController.clear();
+        fileUrlController.clear();
+        mimeTypeController.clear();
+      } else {
+        final first = selectedImages.first;
+        fileNameController.text = first.name;
+        fileUrlController.text = first.name;
+        mimeTypeController.text = mimeTypeFromFileName(first.name);
+      }
+    });
+  }
+
+  void clearExcelImages() {
+    setState(() {
+      selectedExcelImages.clear();
+    });
   }
 
   // ============================================================
@@ -440,15 +649,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         firstRow['WEIGHT'],
       );
 
-      final imageName =
-      asText(firstRow['IMAGE']);
+      final firstImageNames =
+      _imageNamesFromExcelValue(firstRow['IMAGE']);
 
-      if (imageName.isNotEmpty) {
+      if (firstImageNames.isNotEmpty) {
+        final imageName = firstImageNames.first;
         fileUrlController.text = imageName;
         fileNameController.text = imageName;
-
-        mimeTypeController.text =
-            mimeTypeFromFileName(imageName);
+        mimeTypeController.text = mimeTypeFromFileName(imageName);
       }
 
       // ========================================================
@@ -456,8 +664,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       // ========================================================
 
       final details = rows.map((row) {
-        final imageName =
-        asText(row['IMAGE']);
+        final imageNames =
+        _imageNamesFromExcelValue(row['IMAGE']);
+
+        if (imageNames.length > 5) {
+          throw Exception(
+            'Item ${asText(row['ITEM CODE'])}: প্রতি item-এ সর্বোচ্চ 5টি image allowed.',
+          );
+        }
+
+        final firstImageName =
+        imageNames.isNotEmpty ? imageNames.first : '';
 
         return <String, dynamic>{
           "source_sl":
@@ -477,15 +694,19 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           ),
 
           "file_url":
-          imageName,
+          firstImageName,
 
           "file_name":
-          imageName,
+          firstImageName,
 
           "mime_type":
-          mimeTypeFromFileName(
-            imageName,
-          ),
+          firstImageName.isEmpty
+              ? ''
+              : mimeTypeFromFileName(firstImageName),
+
+          // Internal helper. API পাঠানোর আগে remove করা হবে।
+          "_image_names":
+          imageNames,
 
           "item_code":
           asText(
@@ -598,6 +819,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     setState(() {
       selectedExcelName = null;
       excelDetails = [];
+      selectedExcelImages.clear();
     });
 
     ScaffoldMessenger.of(context)
@@ -615,6 +837,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   // ============================================================
 
   Map<String, dynamic> createManualDetail() {
+    final PlatformFile? firstImage =
+    selectedImages.isNotEmpty ? selectedImages.first : null;
+
     return {
       "source_sl": int.tryParse(
         sourceSlController.text.trim(),
@@ -630,13 +855,18 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       itemQrCodeController.text.trim(),
 
       "file_url":
-      fileUrlController.text.trim(),
+      firstImage?.name ?? fileUrlController.text.trim(),
 
       "file_name":
-      fileNameController.text.trim(),
+      firstImage?.name ?? fileNameController.text.trim(),
 
       "mime_type":
-      mimeTypeController.text.trim(),
+      firstImage != null
+          ? mimeTypeFromFileName(firstImage.name)
+          : mimeTypeController.text.trim(),
+
+      "images":
+      _manualImagesPayload(),
 
       "item_code":
       itemCodeController.text.trim(),
@@ -731,12 +961,20 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     // Excel না থাকলে -> Manual single detail
     // ==========================================================
 
-    final List<Map<String, dynamic>> details =
-    excelDetails.isNotEmpty
-        ? excelDetails
-        : [
-      createManualDetail(),
-    ];
+    final List<Map<String, dynamic>> details;
+
+    if (excelDetails.isNotEmpty) {
+      details = excelDetails.map((original) {
+        final detail = Map<String, dynamic>.from(original);
+        detail['images'] = _excelImagesPayloadForDetail(detail);
+        detail.remove('_image_names');
+        return detail;
+      }).toList();
+    } else {
+      details = [
+        createManualDetail(),
+      ];
+    }
 
     final Map<String, dynamic> body = {
       "business":
@@ -767,10 +1005,18 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       details,
     };
 
-    debugPrint(
-      const JsonEncoder.withIndent('  ')
-          .convert(body),
+    final int totalImageCount = details.fold<int>(
+      0,
+          (sum, detail) =>
+      sum + ((detail['images'] is List) ? (detail['images'] as List).length : 0),
     );
+
+    debugPrint('==========================================');
+    debugPrint('POST DISPLAY ROOM ITEM UPLOAD');
+    debugPrint('URL => $apiUrl');
+    debugPrint('DETAIL COUNT => ${details.length}');
+    debugPrint('IMAGE COUNT => $totalImageCount');
+    debugPrint('==========================================');
 
     setState(() {
       isLoading = true;
@@ -1117,6 +1363,198 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 ],
               ),
             ),
+
+            const SizedBox(height: 12),
+
+            OutlinedButton.icon(
+              onPressed: isReadingExcelImages || isLoading
+                  ? null
+                  : selectExcelImages,
+              icon: isReadingExcelImages
+                  ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+                  : const Icon(Icons.add_photo_alternate_outlined),
+              label: Text(
+                isReadingExcelImages
+                    ? 'Reading Images...'
+                    : 'Select Excel Image Files',
+              ),
+            ),
+
+            const SizedBox(height: 8),
+
+            Text(
+              'Excel-এর IMAGE column-এর filename-এর সাথে selected image file match হবে. '
+                  'একটি cell-এ multiple image হলে comma/semicolon দিয়ে filename লিখতে পারবেন.',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey.shade600,
+              ),
+            ),
+
+            if (selectedExcelImages.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ...selectedExcelImages.map(
+                        (file) => Chip(
+                      avatar: const Icon(Icons.image_outlined, size: 18),
+                      label: Text(file.name),
+                    ),
+                  ),
+                  ActionChip(
+                    avatar: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('Clear Images'),
+                    onPressed: isLoading ? null : clearExcelImages,
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // MANUAL IMAGE PICKER UI
+  // ============================================================
+
+  Widget buildManualImagePicker() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.photo_library_outlined),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Product Images',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                '${selectedImages.length}/5',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'JPG, JPEG, PNG, WEBP বা GIF — একটি item-এ সর্বোচ্চ 5টি image.',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey.shade600,
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: isReadingImages || isLoading || selectedImages.length >= 5
+                ? null
+                : selectManualImages,
+            icon: isReadingImages
+                ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+                : const Icon(Icons.add_photo_alternate_outlined),
+            label: Text(
+              isReadingImages
+                  ? 'Reading Images...'
+                  : selectedImages.isEmpty
+                  ? 'Select Images'
+                  : 'Add More Images',
+            ),
+          ),
+          if (selectedImages.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: List.generate(
+                selectedImages.length,
+                    (index) {
+                  final file = selectedImages[index];
+                  return Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Container(
+                        width: 120,
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey.shade300),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: file.bytes != null
+                                  ? Image.memory(
+                                file.bytes!,
+                                width: 100,
+                                height: 80,
+                                fit: BoxFit.cover,
+                              )
+                                  : Container(
+                                width: 100,
+                                height: 80,
+                                color: Colors.grey.shade100,
+                                child: const Icon(Icons.image_not_supported_outlined),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              file.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Positioned(
+                        right: -8,
+                        top: -8,
+                        child: Material(
+                          color: Colors.red,
+                          shape: const CircleBorder(),
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: isLoading ? null : () => removeManualImage(index),
+                            child: const Padding(
+                              padding: EdgeInsets.all(4),
+                              child: Icon(
+                                Icons.close,
+                                size: 15,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
           ],
         ],
       ),
@@ -1446,6 +1884,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
                 gap(),
 
+                if (excelDetails.isEmpty) ...[
+                  buildManualImagePicker(),
+                  gap(),
+                ],
+
                 twoFields(
                   first: buildTextField(
                     label: 'Weight',
@@ -1460,9 +1903,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   ),
                   second: buildTextField(
                     label: 'MIME Type',
-                    hint: 'e.g. image/png',
+                    hint: 'Auto from selected image',
                     controller:
                     mimeTypeController,
+                    required: false,
                   ),
                 ),
 
@@ -1472,16 +1916,18 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   first: buildTextField(
                     label: 'File Name',
                     hint:
-                    'e.g. DP_ROOM_521.png',
+                    'Auto from selected image',
                     controller:
                     fileNameController,
+                    required: false,
                   ),
                   second: buildTextField(
                     label: 'File URL',
                     hint:
-                    'e.g. DP_ROOM_521.png',
+                    'Auto from selected image',
                     controller:
                     fileUrlController,
+                    required: false,
                   ),
                 ),
 
@@ -2497,4 +2943,3 @@ class DisplayRoomItem {
     return '';
   }
 }
-
