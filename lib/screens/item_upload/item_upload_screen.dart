@@ -89,6 +89,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   final fobController = TextEditingController();
   final materialSpecificationController = TextEditingController();
   final weightController = TextEditingController();
+  final sizeRangeController = TextEditingController();
+  final moqController = TextEditingController();
 
   @override
   void initState() {
@@ -565,21 +567,69 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           row[header] = value;
         }
 
-        final itemCode =
-        asText(row['ITEM CODE']);
-
-        // Completely empty row skip
-        if (itemCode.isEmpty) {
+        // Ignore only fully blank rows. A partially populated row must fail
+        // required-field validation rather than silently disappearing.
+        if (row.values.every((value) => asText(value).isEmpty)) {
           continue;
         }
-
+        if (asText(row['ITEM CATEGORY']).isEmpty) {
+          row['ITEM CATEGORY'] = row['PRODUCT CATEGORY'];
+        }
+        if (asText(row['ORG']).isEmpty) {
+          row['ORG'] = row['ORGANIZATION ID'];
+        }
+        if (asText(row['PICTURE']).isEmpty) {
+          row['PICTURE'] = row['IMAGE'];
+        }
+        row['SERIAL'] = rows.length + 1; // Preview sequence, never DB PK.
         rows.add(row);
       }
 
       if (rows.isEmpty) {
-        throw Exception(
-          'Excel file-এ valid item পাওয়া যায়নি',
-        );
+        throw Exception('Excel file-এ valid item পাওয়া যায়নি');
+      }
+
+      // Validate the ENTIRE workbook before a single POST. The API accepts
+      // one master business/organization per request; reject mixed files.
+      final failures = <String>[];
+      final firstBusiness = asText(rows.first['BUSINESS']).toLowerCase();
+      final firstOrg = asInt(rows.first['ORG']);
+      for (int index = 0; index < rows.length; index++) {
+        final row = rows[index];
+        final missing = <String>[];
+        for (final key in const <String>[
+          'BUSINESS', 'ITEM CATEGORY', 'ITEM CODE', 'ORG',
+          'FOB', 'PICTURE', 'SIZE RANGE', 'MOQ',
+        ]) {
+          if (asText(row[key]).isEmpty) missing.add(key);
+        }
+        if (missing.isNotEmpty) {
+          failures.add('Row ${index + 2}: missing ${missing.join(', ')}');
+        }
+        if (asText(row['ORG']).isNotEmpty && (asInt(row['ORG']) == null ||
+            asDouble(row['ORG']) != asInt(row['ORG'])!.toDouble())) {
+          failures.add('Row ${index + 2}: ORG must be a numeric organization ID');
+        }
+        final fobText = asText(row['FOB']);
+        if (fobText.isNotEmpty &&
+            (asDouble(row['FOB']) == null || asDouble(row['FOB'])! < 0)) {
+          failures.add('Row ${index + 2}: FOB must be a non-negative number');
+        }
+        final moqText = asText(row['MOQ']);
+        if (moqText.isNotEmpty &&
+            (asDouble(row['MOQ']) == null || asDouble(row['MOQ'])! <= 0)) {
+          failures.add('Row ${index + 2}: MOQ must be greater than zero');
+        }
+        if (asText(row['BUSINESS']).toLowerCase() != firstBusiness ||
+            asInt(row['ORG']) != firstOrg) {
+          failures.add('Row ${index + 2}: Business/ORG differs from the first row');
+        }
+        if (imageNamesFromExcelValue(row['PICTURE']).length > 5) {
+          failures.add('Row ${index + 2}: maximum 5 pictures per product');
+        }
+      }
+      if (failures.isNotEmpty) {
+        throw FormatException('Excel validation failed:\n${failures.take(15).join('\n')}');
       }
 
       // ========================================================
@@ -606,13 +656,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       // Excel-এ Organization ID থাকলে fill করবে।
       setControllerIfAvailable(
         organizationIdController,
-        firstRow['ORGANIZATION ID'],
+        firstRow['ORG'],
       );
 
       // First detail row preview - current visible fields only
       setControllerIfAvailable(
         productCategoryController,
-        firstRow['PRODUCT CATEGORY'],
+        firstRow['ITEM CATEGORY'],
       );
 
       setControllerIfAvailable(
@@ -655,13 +705,16 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         firstRow['WEIGHT'],
       );
 
+      setControllerIfAvailable(sizeRangeController, firstRow['SIZE RANGE']);
+      setControllerIfAvailable(moqController, firstRow['MOQ']);
+
       // ========================================================
       // CREATE ALL EXCEL DETAILS
       // ========================================================
 
       final details = rows.map((row) {
         final imageNames =
-        imageNamesFromExcelValue(row['IMAGE']);
+        imageNamesFromExcelValue(row['PICTURE']);
 
         final model3DName =
         _modelNameFromExcelRow(row);
@@ -675,7 +728,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         return <String, dynamic>{
           "product_category":
           asText(
-            row['PRODUCT CATEGORY'],
+            row['ITEM CATEGORY'],
           ),
 
           // Internal helper. API পাঠানোর আগে remove করা হবে।
@@ -688,9 +741,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           model3DName,
 
           "item_code":
-          asText(
-            row['ITEM CODE'],
-          ),
+           asText(
+             row['ITEM CODE'],
+           ),
+
+           // Server contract must persist size_range and quantity/MOQ.
+           "size_range": asText(row['SIZE RANGE']),
+           "moq": asDouble(row['MOQ']),
+           "quantity": asDouble(row['MOQ']),
 
           "description":
           asText(
@@ -727,6 +785,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         selectedExcelName = file.name;
         excelDetails = details;
         const hiddenLegacyHeaders = <String>{
+           'PRINT ITEM', 'QR CODE', 'TRACK MARK', 'FACTORY',
+           'ITEM QR CODE', 'TRACKMARK', 'PRINT VALUE', 'SERIAL NO',
+           'SERIAL NUMBER', 'SL NO',
           'DISPLAY ROOM NO',
           'ITEM QRCODE',
           'SL',
@@ -739,8 +800,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           'MIME TYPE',
         };
 
-        excelTableHeaders = headers
-            .where(
+        excelTableHeaders = <String>['SERIAL', ...headers.where((h) => h != 'SERIAL')]
+             .where(
               (header) =>
           header.isNotEmpty &&
               !hiddenLegacyHeaders.contains(header),
@@ -855,8 +916,12 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       materialSpecificationController.text.trim(),
 
       "weight": double.tryParse(
-        weightController.text.trim(),
-      ),
+       weightController.text.trim(),
+       ),
+
+       "size_range": sizeRangeController.text.trim(),
+       "moq": double.tryParse(moqController.text.trim()),
+       "quantity": double.tryParse(moqController.text.trim()),
 
       "images":
       _manualImagesPayload(),
@@ -996,7 +1061,29 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     final List<Map<String, dynamic>> details;
 
     if (excelDetails.isNotEmpty) {
-      final missing3DModels = _missingExcel3DModelFiles();
+       // Images must exist as bytes before upload, not merely as filenames.
+       final filesByName = <String>{
+         for (final file in selectedExcelImages)
+           if (file.bytes != null) file.name.toLowerCase(),
+       };
+       final missingImages = <String>{};
+       for (final row in excelDetails) {
+         final names = row['_image_names'];
+         if (names is List) {
+           for (final name in names) {
+             final filename = name.toString().trim();
+             if (filename.isNotEmpty &&
+                 !filesByName.contains(filename.toLowerCase())) {
+               missingImages.add(filename);
+             }
+           }
+         }
+       }
+       if (missingImages.isNotEmpty) {
+         showError('Missing picture files: ${missingImages.join(', ')}');
+         return;
+       }
+       final missing3DModels = _missingExcel3DModelFiles();
 
       if (missing3DModels.isNotEmpty) {
         showError(
@@ -1027,12 +1114,22 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         return detail;
       }).toList();
     } else {
-      details = [
-        createManualDetail(),
-      ];
-    }
+       if (selectedImages.isEmpty) {
+         showError('Picture is mandatory');
+         return;
+       }
+       if (sizeRangeController.text.trim().isEmpty ||
+           double.tryParse(moqController.text.trim()) == null ||
+           double.tryParse(moqController.text.trim())! <= 0 ||
+           double.tryParse(fobController.text.trim()) == null ||
+           double.tryParse(fobController.text.trim())! < 0) {
+         showError('Size Range, MOQ (> 0) and FOB are mandatory');
+         return;
+       }
+       details = [createManualDetail()];
+     }
 
-    // Final normalization before JSON encode / HTTP POST.
+     // Final normalization before JSON encode / HTTP POST.
     // This guarantees CBM is always a JSON String.
     final normalizedDetails = details
         .map(_normalizeDetailForApi)
@@ -1786,6 +1883,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                       label: 'Sub Category',
                       hint: 'e.g. Export',
                       controller: subCategoryController,
+                    required: false,
                     ),
                     second: DropdownButtonFormField<String>(
                       value: statusController.text.isEmpty
@@ -1847,6 +1945,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     label: 'Display Room Name',
                     hint: 'e.g. MLIL-R10-Ftwr-Display Room',
                     controller: displayRoomNameController,
+                    required: false,
                   ),
                   second: buildTextField(
                     label: 'Assignee',
@@ -1900,7 +1999,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
                 twoFields(
                   first: buildTextField(
-                    label: 'Product Category',
+                    label: 'Item Category',
                     hint: 'e.g. Cemented',
                     controller: productCategoryController,
                   ),
@@ -1908,6 +2007,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     label: 'CBM',
                     hint: 'e.g. 54 CBM / Small / N/A / 12 x 20',
                     controller: cbmController,
+                    required: false,
                     keyboardType: TextInputType.text,
                   ),
                 ),
@@ -1929,6 +2029,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                         label: 'Sub Inventory Code',
                         hint: 'e.g. PN1.RM',
                         controller: subInventoryCodeController,
+                    required: false,
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1937,6 +2038,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                         label: 'Weight',
                         hint: 'e.g. 0.2',
                         controller: weightController,
+                    required: false,
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
@@ -1951,6 +2053,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   label: 'Description',
                   hint: 'e.g. LIDL SEMI FINISHED UPPER WHITE',
                   controller: descriptionController,
+                    required: false,
                   maxLines: 2,
                 ),
 
@@ -1961,6 +2064,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     label: 'UOM',
                     hint: 'e.g. Pair',
                     controller: uomController,
+                    required: false,
                   ),
                   second: buildTextField(
                     label: 'FOB',
@@ -1978,12 +2082,29 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   label: 'Material Specification',
                   hint: 'e.g. Mesh+3mm Foam+42gtc lamination',
                   controller: materialSpecificationController,
+                    required: false,
                   maxLines: 2,
                 ),
 
                 gap(),
 
-                if (excelDetails.isEmpty) ...[
+                 twoFields(
+                   first: buildTextField(
+                     label: 'Size Range',
+                     hint: 'e.g. 36-42',
+                     controller: sizeRangeController,
+                   ),
+                   second: buildTextField(
+                     label: 'MOQ',
+                     hint: 'e.g. 250',
+                     controller: moqController,
+                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                   ),
+                 ),
+
+                 gap(),
+
+                 if (excelDetails.isEmpty) ...[
                   buildManualImagePicker(),
                   gap(),
                   buildManual3DModelPicker(),
@@ -2063,6 +2184,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     fobController.dispose();
     materialSpecificationController.dispose();
     weightController.dispose();
+     sizeRangeController.dispose();
+     moqController.dispose();
 
     super.dispose();
   }

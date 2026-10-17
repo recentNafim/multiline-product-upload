@@ -29,107 +29,55 @@ class DisplayRoomItem {
   final double? fob;
   final double? weight;
   final String materialSpecification;
+  final String sizeRange;
+  final List<String> images;
 
-  const DisplayRoomItem({
-    required this.sl,
-    required this.masterSl,
-    required this.business,
-    required this.subCategory,
-    required this.organizationId,
-    required this.organizationCode,
-    required this.displayRoomNo,
-    required this.displayRoomName,
-    required this.status,
-    required this.assignee,
-    required this.createdBy,
-    required this.updatedBy,
-    required this.sourceSl,
-    required this.productCategory,
-    required this.printValue,
-    required this.itemQrCode,
-    required this.fileUrl,
-    required this.fileName,
-    required this.mimeType,
-    required this.itemCode,
-    required this.description,
-    required this.uom,
-    required this.quantity,
-    required this.unitPrice,
-    required this.subInventoryCode,
-    required this.locatorId,
-    required this.cbm,
-    required this.fob,
-    required this.weight,
-    required this.materialSpecification,
-  });
+  const DisplayRoomItem({required this.sl, required this.masterSl,
+    required this.business, required this.subCategory, required this.organizationId,
+    required this.organizationCode, required this.displayRoomNo, required this.displayRoomName,
+    required this.status, required this.assignee, required this.createdBy, required this.updatedBy,
+    required this.sourceSl, required this.productCategory, required this.printValue,
+    required this.itemQrCode, required this.fileUrl, required this.fileName,
+    required this.mimeType, required this.itemCode, required this.description,
+    required this.uom, required this.quantity, required this.unitPrice,
+    required this.subInventoryCode, required this.locatorId, required this.cbm,
+    required this.fob, required this.weight, required this.materialSpecification,
+    required this.sizeRange, required this.images});
 
-  factory DisplayRoomItem.fromJson(Map<String, dynamic> json) {
-    dynamic v(String lower, String upper) => json[lower] ?? json[upper];
-
-    final note = _text(v('note', 'NOTE'));
-
-    return DisplayRoomItem(
-      sl: _int(v('sl', 'SL')),
-      masterSl: _int(v('m_sl', 'M_SL')),
-      business: _text(v('business', 'BUSINESS')),
-      subCategory: _text(v('sub_category', 'SUB_CATEGORY')),
-      organizationId: _int(v('organization_id', 'ORGANIZATION_ID')),
-      organizationCode: _text(v('organization_code', 'ORGANIZATION_CODE')),
-      displayRoomNo: _text(v('display_room_no', 'DISPLAY_ROOM_NO')),
-      displayRoomName: _text(v('display_room_name', 'DISPLAY_ROOM_NAME')),
-      status: _text(v('status', 'STATUS')),
-      assignee: _int(v('assignee', 'ASSIGNEE')),
-      createdBy: _int(v('created_by', 'CREATED_BY')),
-      updatedBy: _int(v('updated_by', 'UPDATED_BY')),
-      sourceSl: _extractNote(note, 'SOURCE_SL'),
-      productCategory: _text(v('product_category', 'PRODUCT_CATEGORY')),
-      printValue: _extractNote(note, 'PRINT'),
-      itemQrCode: _extractNote(note, 'ITEM_QRCODE'),
-      fileUrl: _text(v('file_url', 'FILE_URL')),
-      fileName: _text(v('file_name', 'FILE_NAME')),
-      mimeType: _text(v('mime_type', 'MIME_TYPE')),
-      itemCode: _text(v('item_code', 'ITEM_CODE')),
-      description: _text(v('description', 'DESCRIPTION')),
-      uom: _text(v('uom', 'UOM')),
-      quantity: _double(v('quantity', 'QUANTITY')),
-      unitPrice: _double(v('unit_price', 'UNIT_PRICE')),
-      subInventoryCode:
-      _text(v('sub_inventory_code', 'SUB_INVENTORY_CODE')),
-      locatorId: _int(v('locator_id', 'LOCATOR_ID')),
-      cbm: _text(v('cbm', 'CBM')),
-      fob: _double(v('fob', 'FOB')),
-      weight: _double(v('weight', 'WEIGHT')),
-      materialSpecification:
-      _text(v('material_specification', 'MATERIAL_SPECIFICATION')),
-    );
-  }
-
-  static String _text(dynamic value) => value?.toString().trim() ?? '';
-
-  static int? _int(dynamic value) {
-    if (value == null) return null;
-    return int.tryParse(value.toString()) ??
-        double.tryParse(value.toString())?.toInt();
-  }
-
-  static double? _double(dynamic value) {
-    if (value == null) return null;
-    return double.tryParse(value.toString());
-  }
-
-  static String _extractNote(String note, String key) {
-    if (note.isEmpty) return '';
-
-    for (final part in note.split(';')) {
-      final index = part.indexOf('=');
-      if (index <= 0) continue;
-
-      final currentKey = part.substring(0, index).trim().toUpperCase();
-      if (currentKey == key.toUpperCase()) {
-        return part.substring(index + 1).trim();
+  factory DisplayRoomItem.fromMasterDetail(Map<String, dynamic> master,
+      Map<String, dynamic> detail) {
+    String s(dynamic v) => v?.toString().trim() ?? '';
+    int? i(dynamic v) => v is num ? v.toInt() : int.tryParse(s(v));
+    double? d(dynamic v) => v is num ? v.toDouble() : double.tryParse(s(v));
+    final rawImages = detail['images'];
+    final photos = <String>[];
+    if (rawImages is List) {
+      for (final photo in rawImages) {
+        if (photo is Map) {
+          final name = s(photo['image_url'] ?? photo['file_url'] ?? photo['file_name']);
+          if (name.isNotEmpty) photos.add(name);
+        } else if (s(photo).isNotEmpty) { photos.add(s(photo)); }
       }
     }
-
-    return '';
+    return DisplayRoomItem(
+      sl: i(detail['sl']), masterSl: i(master['sl']),
+      business: s(master['business']), subCategory: s(master['sub_category']),
+      organizationId: i(master['organization_id'] ?? detail['organization_id']),
+      organizationCode: s(master['organization_code']),
+      displayRoomNo: s(master['display_room_no']),
+      displayRoomName: s(master['display_room_name']),
+      status: s(master['status']), assignee: i(master['assignee']),
+      createdBy: i(master['created_by']), updatedBy: i(master['updated_by']),
+      sourceSl: s(detail['source_sl']), productCategory: s(detail['product_category']),
+      printValue: s(detail['print']), itemQrCode: s(detail['item_qrcode']),
+      fileUrl: s(detail['file_url']), fileName: s(detail['file_name']),
+      mimeType: s(detail['mime_type']), itemCode: s(detail['item_code']),
+      description: s(detail['description']), uom: s(detail['uom']),
+      quantity: d(detail['moq'] ?? detail['quantity']), unitPrice: d(detail['unit_price']),
+      subInventoryCode: s(detail['sub_inventory_code']), locatorId: i(detail['locator_id']),
+      cbm: s(detail['cbm']), fob: d(detail['fob']), weight: d(detail['weight']),
+      materialSpecification: s(detail['material_specification']),
+      sizeRange: s(detail['size_range'] ?? detail['sizeRange']), images: photos,
+    );
   }
 }

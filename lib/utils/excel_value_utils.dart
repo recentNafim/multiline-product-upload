@@ -1,15 +1,9 @@
 import 'dart:convert';
-
 import 'package:excel/excel.dart' as xls;
 import 'package:file_picker/file_picker.dart';
 
-String normalizeHeader(String value) {
-  return value
-      .trim()
-      .toUpperCase()
-      .replaceAll('_', ' ')
-      .replaceAll(RegExp(r'\s+'), ' ');
-}
+String normalizeHeader(String value) => value.trim().toUpperCase()
+    .replaceAll('_', ' ').replaceAll(RegExp(r'\s+'), ' ');
 
 dynamic getExcelValue(xls.Data? cell) {
   final value = cell?.value;
@@ -57,18 +51,14 @@ String mimeTypeFromFileName(String fileName) {
 List<String> imageNamesFromExcelValue(dynamic value) {
   final text = asText(value);
   if (text.isEmpty) return <String>[];
-  return text
-      .split(RegExp(r'[,;|\n]'))
-      .map((e) => e.trim())
-      .where((e) => e.isNotEmpty)
-      .toList();
+  return text.split(RegExp(r'[,;|\n]')).map((e) => e.trim())
+      .where((e) => e.isNotEmpty).toList();
 }
 
 Map<String, dynamic> platformFileToImageJson(PlatformFile file) {
   if (file.bytes == null) {
     throw Exception('${file.name} file-এর bytes পাওয়া যায়নি');
   }
-
   return <String, dynamic>{
     'picture_base64': base64Encode(file.bytes!),
     'file_name': file.name,

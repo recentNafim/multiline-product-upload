@@ -1,11 +1,7 @@
 class DeleteParsedData {
   final List<DeleteProductRow> products;
   final List<DeleteMasterRow> masters;
-
-  const DeleteParsedData({
-    required this.products,
-    required this.masters,
-  });
+  const DeleteParsedData({required this.products, required this.masters});
 }
 
 class DeleteProductRow {
@@ -19,19 +15,11 @@ class DeleteProductRow {
   final String displayRoomNo;
   final String displayRoomName;
   final String imageUrl;
-
-  const DeleteProductRow({
-    required this.detailSl,
-    required this.masterSl,
-    required this.itemCode,
-    required this.description,
-    required this.productCategory,
-    required this.business,
-    required this.subCategory,
-    required this.displayRoomNo,
-    required this.displayRoomName,
-    required this.imageUrl,
-  });
+  const DeleteProductRow({required this.detailSl, required this.masterSl,
+    required this.itemCode, required this.description,
+    required this.productCategory, required this.business,
+    required this.subCategory, required this.displayRoomNo,
+    required this.displayRoomName, required this.imageUrl});
 }
 
 class DeleteMasterRow {
@@ -44,36 +32,13 @@ class DeleteMasterRow {
   final int? organizationId;
   final String status;
   final int detailsCount;
-
-  const DeleteMasterRow({
-    required this.masterSl,
-    required this.business,
-    required this.subCategory,
-    required this.displayRoomNo,
-    required this.displayRoomName,
-    required this.organizationCode,
-    required this.organizationId,
-    required this.status,
-    required this.detailsCount,
-  });
+  const DeleteMasterRow({required this.masterSl, required this.business,
+    required this.subCategory, required this.displayRoomNo,
+    required this.displayRoomName, required this.organizationCode,
+    required this.organizationId, required this.status,
+    required this.detailsCount});
 }
 
-String deleteAsText(dynamic value) {
-  return value?.toString().trim() ?? '';
-}
-
-int? deleteAsInt(dynamic value) {
-  if (value == null) {
-    return null;
-  }
-
-  final String text =
-  value.toString().trim();
-
-  if (text.isEmpty) {
-    return null;
-  }
-
-  return int.tryParse(text) ??
-      double.tryParse(text)?.toInt();
-}
+String deleteAsText(dynamic value) => value?.toString().trim() ?? '';
+int? deleteAsInt(dynamic value) =>
+  value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');

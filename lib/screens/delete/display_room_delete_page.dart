@@ -1,1294 +1,221 @@
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
-
-import '../../core/constants/api_constants.dart';
 import '../../models/delete_models.dart';
 import '../../services/display_room_api_service.dart';
 
 class DisplayRoomDeletePage extends StatefulWidget {
   const DisplayRoomDeletePage({super.key});
-
   @override
-  State<DisplayRoomDeletePage> createState() =>
-      _DisplayRoomDeletePageState();
+  State<DisplayRoomDeletePage> createState() => _DisplayRoomDeletePageState();
 }
 
 class _DisplayRoomDeletePageState extends State<DisplayRoomDeletePage> {
-  static const String apiUrl = ApiConstants.deleteItem;
-  static const String imageBaseUrl = ApiConstants.imageBase;
-
-  final TextEditingController searchController =
-  TextEditingController();
-
+  final searchController = TextEditingController();
   bool isLoading = false;
-  String? deletingKey;
-
+  bool deleting = false;
+  String? error;
   List<DeleteProductRow> products = [];
-  List<DeleteProductRow> filteredProducts = [];
-
   List<DeleteMasterRow> masters = [];
 
   @override
   void initState() {
     super.initState();
-    searchController.addListener(_applyFilter);
-    _loadDeleteData();
+    searchController.addListener(() { if (mounted) setState(() {}); });
+    _load();
   }
 
-  // ==========================================================================
-  // LOAD GET DATA
-  // ==========================================================================
-
-  Future<void> _loadDeleteData() async {
-    if (isLoading) {
-      return;
+  DeleteParsedData _parse(dynamic json) {
+    final data = json is List ? json : (json is Map
+      ? json['data'] ?? json['items'] ?? json['item_list'] : null);
+    final result = <DeleteProductRow>[];
+    final masterRows = <DeleteMasterRow>[];
+    if (data is List) {
+      for (final raw in data) {
+        if (raw is! Map) continue;
+        final master = Map<String, dynamic>.from(raw);
+        final sl = deleteAsInt(master['sl'] ?? master['master_sl']);
+        final business = deleteAsText(master['business']);
+        final sub = deleteAsText(master['sub_category']);
+        final roomNo = deleteAsText(master['display_room_no']);
+        final roomName = deleteAsText(master['display_room_name']);
+        final orgCode = deleteAsText(master['organization_code']);
+        final details = master['details'];
+        final children = details is List ? details : (master.containsKey('item_code')
+            ? <dynamic>[master] : <dynamic>[]);
+        masterRows.add(DeleteMasterRow(
+          masterSl: sl, business: business, subCategory: sub,
+          displayRoomNo: roomNo, displayRoomName: roomName,
+          organizationCode: orgCode, organizationId: deleteAsInt(master['organization_id']),
+          status: deleteAsText(master['status']), detailsCount: children.length,
+        ));
+        for (final rawDetail in children) {
+          if (rawDetail is! Map) continue;
+          final d = Map<String, dynamic>.from(rawDetail);
+          final images = d['images'];
+          String image = deleteAsText(d['file_url']);
+          if (image.isEmpty && images is List && images.isNotEmpty) {
+            final photo = images.first;
+            image = photo is Map ? deleteAsText(photo['image_url'] ?? photo['file_url'])
+              : deleteAsText(photo);
+          }
+          result.add(DeleteProductRow(
+            detailSl: deleteAsInt(d['sl'] ?? d['detail_sl']),
+            masterSl: sl, itemCode: deleteAsText(d['item_code']),
+            description: deleteAsText(d['description']),
+            productCategory: deleteAsText(d['product_category']),
+            business: business, subCategory: sub,
+            displayRoomNo: roomNo, displayRoomName: roomName, imageUrl: image,
+          ));
+        }
+      }
     }
+    return DeleteParsedData(products: result, masters: masterRows);
+  }
 
-    setState(() {
-      isLoading = true;
-    });
-
+  Future<void> _load() async {
+    if (isLoading) return;
+    setState(() { isLoading = true; error = null; });
     try {
       final response = await DisplayRoomApiService.getDeleteData();
-
-      debugPrint('==========================================');
-      debugPrint('DELETE PAGE GET');
-      debugPrint('URL => $apiUrl');
-      debugPrint('STATUS => ${response.statusCode}');
-      debugPrint('==========================================');
-
-      if (response.statusCode < 200 ||
-          response.statusCode >= 300) {
-        throw Exception(
-          'HTTP ${response.statusCode}: ${response.body}',
-        );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('HTTP ${response.statusCode}');
       }
-
-      final dynamic decoded =
-      jsonDecode(response.body);
-
-      final parsed =
-      _parseDeleteResponse(decoded);
-
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        products = parsed.products;
-        masters = parsed.masters;
-      });
-
-      _applyFilter();
+      final parsed = _parse(jsonDecode(response.body));
+      if (!mounted) return;
+      setState(() { products = parsed.products; masters = parsed.masters; });
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      _showMessage(
-        'Delete page data load failed: $e',
-        isError: true,
-      );
+      if (mounted) setState(() => error = e.toString());
     } finally {
-      if (mounted) {
-        setState(() {
-          isLoading = false;
-        });
-      }
+      if (mounted) setState(() => isLoading = false);
     }
   }
 
-  // ==========================================================================
-  // PARSE API RESPONSE
-  //
-  // Supports the current nested response:
-  //
-  // data: [
-  //   {
-  //     sl: MASTER_SL,
-  //     ...
-  //     details: [
-  //       {
-  //         sl: DETAIL_SL,
-  //         ...
-  //         images: [...]
-  //       }
-  //     ]
-  //   }
-  // ]
-  //
-  // Also supports a flat list for backward compatibility.
-  // ==========================================================================
-
-  DeleteParsedData _parseDeleteResponse(
-      dynamic decoded,
-      ) {
-    final List<DeleteProductRow> productRows = [];
-    final List<DeleteMasterRow> masterRows = [];
-
-    List<dynamic> rootList = [];
-
-    if (decoded is List) {
-      rootList = decoded;
-    } else if (decoded is Map) {
-      const possibleKeys = [
-        'data',
-        'DATA',
-        'items',
-        'ITEMS',
-        'item_list',
-        'ITEM_LIST',
-      ];
-
-      for (final key in possibleKeys) {
-        if (decoded[key] is List) {
-          rootList =
-          List<dynamic>.from(decoded[key]);
-          break;
-        }
-      }
-    }
-
-    for (final dynamic raw in rootList) {
-      if (raw is! Map) {
-        continue;
-      }
-
-      final Map<String, dynamic> master =
-      Map<String, dynamic>.from(raw);
-
-      final dynamic detailsRaw =
-          master['details'] ??
-              master['DETAILS'];
-
-      // ----------------------------------------------------------------------
-      // NESTED MASTER + DETAILS RESPONSE
-      // ----------------------------------------------------------------------
-      if (detailsRaw is List) {
-        final int? masterSl = deleteAsInt(
-          master['sl'] ??
-              master['SL'] ??
-              master['master_sl'] ??
-              master['MASTER_SL'],
-        );
-
-        final String business =
-        deleteAsText(
-          master['business'] ??
-              master['BUSINESS'],
-        );
-
-        final String subCategory =
-        deleteAsText(
-          master['sub_category'] ??
-              master['SUB_CATEGORY'],
-        );
-
-        final String displayRoomNo =
-        deleteAsText(
-          master['display_room_no'] ??
-              master['DISPLAY_ROOM_NO'],
-        );
-
-        final String displayRoomName =
-        deleteAsText(
-          master['display_room_name'] ??
-              master['DISPLAY_ROOM_NAME'],
-        );
-
-        final String organizationCode =
-        deleteAsText(
-          master['organization_code'] ??
-              master['ORGANIZATION_CODE'],
-        );
-
-        final int? organizationId =
-        deleteAsInt(
-          master['organization_id'] ??
-              master['ORGANIZATION_ID'],
-        );
-
-        final String status =
-        deleteAsText(
-          master['status'] ??
-              master['STATUS'],
-        );
-
-        masterRows.add(
-          DeleteMasterRow(
-            masterSl: masterSl,
-            business: business,
-            subCategory: subCategory,
-            displayRoomNo: displayRoomNo,
-            displayRoomName: displayRoomName,
-            organizationCode:
-            organizationCode,
-            organizationId:
-            organizationId,
-            status: status,
-            detailsCount:
-            detailsRaw.length,
-          ),
-        );
-
-        for (final dynamic detailRaw
-        in detailsRaw) {
-          if (detailRaw is! Map) {
-            continue;
-          }
-
-          final Map<String, dynamic> detail =
-          Map<String, dynamic>.from(
-            detailRaw,
-          );
-
-          productRows.add(
-            DeleteProductRow(
-              detailSl: deleteAsInt(
-                detail['sl'] ??
-                    detail['SL'] ??
-                    detail['detail_sl'] ??
-                    detail['DETAIL_SL'],
-              ),
-              masterSl: deleteAsInt(
-                detail['m_sl'] ??
-                    detail['M_SL'] ??
-                    detail['master_sl'] ??
-                    detail['MASTER_SL'],
-              ) ??
-                  masterSl,
-              itemCode: deleteAsText(
-                detail['item_code'] ??
-                    detail['ITEM_CODE'],
-              ),
-              description: deleteAsText(
-                detail['description'] ??
-                    detail['DESCRIPTION'],
-              ),
-              productCategory: deleteAsText(
-                detail['product_category'] ??
-                    detail['PRODUCT_CATEGORY'],
-              ),
-              business: deleteAsText(
-                detail['business'] ??
-                    detail['BUSINESS'],
-              ).isNotEmpty
-                  ? deleteAsText(
-                detail['business'] ??
-                    detail['BUSINESS'],
-              )
-                  : business,
-              subCategory: deleteAsText(
-                detail['sub_category'] ??
-                    detail['SUB_CATEGORY'],
-              ).isNotEmpty
-                  ? deleteAsText(
-                detail['sub_category'] ??
-                    detail['SUB_CATEGORY'],
-              )
-                  : subCategory,
-              displayRoomNo: deleteAsText(
-                detail['display_room_no'] ??
-                    detail['DISPLAY_ROOM_NO'],
-              ).isNotEmpty
-                  ? deleteAsText(
-                detail['display_room_no'] ??
-                    detail['DISPLAY_ROOM_NO'],
-              )
-                  : displayRoomNo,
-              displayRoomName: deleteAsText(
-                detail['display_room_name'] ??
-                    detail['DISPLAY_ROOM_NAME'],
-              ).isNotEmpty
-                  ? deleteAsText(
-                detail['display_room_name'] ??
-                    detail['DISPLAY_ROOM_NAME'],
-              )
-                  : displayRoomName,
-              imageUrl:
-              _firstImageUrl(detail),
-            ),
-          );
-        }
-
-        continue;
-      }
-
-      // ----------------------------------------------------------------------
-      // FLAT DETAIL RESPONSE FALLBACK
-      // ----------------------------------------------------------------------
-      final int? detailSl = deleteAsInt(
-        master['sl'] ??
-            master['SL'] ??
-            master['detail_sl'] ??
-            master['DETAIL_SL'],
-      );
-
-      final int? masterSl = deleteAsInt(
-        master['m_sl'] ??
-            master['M_SL'] ??
-            master['master_sl'] ??
-            master['MASTER_SL'],
-      );
-
-      productRows.add(
-        DeleteProductRow(
-          detailSl: detailSl,
-          masterSl: masterSl,
-          itemCode: deleteAsText(
-            master['item_code'] ??
-                master['ITEM_CODE'],
-          ),
-          description: deleteAsText(
-            master['description'] ??
-                master['DESCRIPTION'],
-          ),
-          productCategory: deleteAsText(
-            master['product_category'] ??
-                master['PRODUCT_CATEGORY'],
-          ),
-          business: deleteAsText(
-            master['business'] ??
-                master['BUSINESS'],
-          ),
-          subCategory: deleteAsText(
-            master['sub_category'] ??
-                master['SUB_CATEGORY'],
-          ),
-          displayRoomNo: deleteAsText(
-            master['display_room_no'] ??
-                master['DISPLAY_ROOM_NO'],
-          ),
-          displayRoomName: deleteAsText(
-            master['display_room_name'] ??
-                master['DISPLAY_ROOM_NAME'],
-          ),
-          imageUrl:
-          _firstImageUrl(master),
-        ),
-      );
-    }
-
-    // ------------------------------------------------------------------------
-    // If flat response had no master list, derive masters from product rows.
-    // ------------------------------------------------------------------------
-    if (masterRows.isEmpty) {
-      final Map<int, List<DeleteProductRow>>
-      grouped = {};
-
-      for (final item in productRows) {
-        if (item.masterSl == null) {
-          continue;
-        }
-
-        grouped
-            .putIfAbsent(
-          item.masterSl!,
-              () => [],
-        )
-            .add(item);
-      }
-
-      for (final entry in grouped.entries) {
-        final first =
-            entry.value.first;
-
-        masterRows.add(
-          DeleteMasterRow(
-            masterSl: entry.key,
-            business: first.business,
-            subCategory:
-            first.subCategory,
-            displayRoomNo:
-            first.displayRoomNo,
-            displayRoomName:
-            first.displayRoomName,
-            organizationCode: '',
-            organizationId: null,
-            status: '',
-            detailsCount:
-            entry.value.length,
-          ),
-        );
-      }
-    }
-
-    return DeleteParsedData(
-      products: productRows,
-      masters: masterRows,
-    );
+  Future<bool> _confirm(String title, String detail) async {
+    if (!mounted) return false;
+    return await showDialog<bool>(context: context, builder: (context) => AlertDialog(
+      icon: const Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+      title: Text(title), content: Text(detail),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(context, true),
+          child: const Text('Delete')),
+      ],
+    )) ?? false;
   }
 
-  // ==========================================================================
-  // IMAGE URL
-  // ==========================================================================
-
-  String _firstImageUrl(
-      Map<String, dynamic> data,
-      ) {
-    String normalize(dynamic value) {
-      if (value == null) {
-        return '';
-      }
-
-      String url =
-      value.toString().trim();
-
-      if (url.isEmpty ||
-          url.toLowerCase() == 'null') {
-        return '';
-      }
-
-      if (url.startsWith('http://') ||
-          url.startsWith('https://')) {
-        return url;
-      }
-
-      while (url.startsWith('/')) {
-        url = url.substring(1);
-      }
-
-      if (url.isEmpty) {
-        return '';
-      }
-
-      return '$imageBaseUrl'
-          '${Uri.encodeComponent(url)}';
-    }
-
-    String url = normalize(
-      data['image_url'] ??
-          data['IMAGE_URL'],
-    );
-
-    if (url.isNotEmpty) {
-      return url;
-    }
-
-    url = normalize(
-      data['file_url'] ??
-          data['FILE_URL'],
-    );
-
-    if (url.isNotEmpty) {
-      return url;
-    }
-
-    final dynamic images =
-        data['images'] ??
-            data['IMAGES'];
-
-    if (images is List) {
-      for (final dynamic image
-      in images) {
-        if (image is! Map) {
-          continue;
-        }
-
-        url = normalize(
-          image['image_url'] ??
-              image['IMAGE_URL'] ??
-              image['file_url'] ??
-              image['FILE_URL'],
-        );
-
-        if (url.isNotEmpty) {
-          return url;
-        }
-      }
-    }
-
-    return '';
-  }
-
-  // ==========================================================================
-  // FILTER
-  // ==========================================================================
-
-  void _applyFilter() {
-    if (!mounted) {
-      return;
-    }
-
-    final String query = searchController.text.trim().toLowerCase();
-
-    setState(() {
-      if (query.isEmpty) {
-        filteredProducts = List<DeleteProductRow>.from(products);
-        return;
-      }
-
-      filteredProducts = products.where((item) {
-        return item.itemCode.toLowerCase().contains(query) ||
-            item.description.toLowerCase().contains(query) ||
-            item.productCategory.toLowerCase().contains(query) ||
-            item.business.toLowerCase().contains(query) ||
-            item.subCategory.toLowerCase().contains(query) ||
-            item.displayRoomNo.toLowerCase().contains(query) ||
-            item.displayRoomName.toLowerCase().contains(query) ||
-            (item.detailSl?.toString().contains(query) ?? false) ||
-            (item.masterSl?.toString().contains(query) ?? false);
-      }).toList();
-    });
-  }
-
-  // ==========================================================================
-  // SINGLE DELETE FLOW
-  // ==========================================================================
-
-  DeleteMasterRow? _findMasterBySl(int? masterSl) {
-    if (masterSl == null) {
-      return null;
-    }
-
-    for (final master in masters) {
-      if (master.masterSl == masterSl) {
-        return master;
-      }
-    }
-
-    return null;
-  }
-
-  bool _isLastProductOfMaster(DeleteProductRow item) {
-    final masterSl = item.masterSl;
-
-    if (masterSl == null) {
-      return false;
-    }
-
-    final count = products
-        .where((product) => product.masterSl == masterSl)
-        .length;
-
-    return count <= 1;
-  }
-
-  Future<void> _confirmDeleteProduct(
-      DeleteProductRow item,
-      ) async {
-    if (item.detailSl == null) {
-      _showMessage(
-        'এই item-এর DETAILS.SL পাওয়া যায়নি। Delete করা যাবে না।',
-        isError: true,
-      );
-      return;
-    }
-
-    final bool deleteWholeMaster =
-        _isLastProductOfMaster(item) &&
-            _findMasterBySl(item.masterSl) != null;
-
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          icon: const Icon(
-            Icons.warning_amber_rounded,
-            color: Colors.redAccent,
-            size: 34,
-          ),
-          title: const Text('Delete Item?'),
-          content: Text(
-            'Item Code: ${item.itemCode.isEmpty ? '-' : item.itemCode}\n'
-                'Description: ${item.description.isEmpty ? '-' : item.description}\n\n'
-                '${deleteWholeMaster
-                ? 'এটি এই Display Room-এর শেষ product। Delete করলে product, images এবং empty master record-ও automatically delete হবে.'
-                : 'এই product এবং এর uploaded images permanently delete হবে.'}',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () =>
-                  Navigator.of(dialogContext).pop(false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(
-                backgroundColor: Colors.redAccent,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () =>
-                  Navigator.of(dialogContext).pop(true),
-              icon: const Icon(
-                Icons.delete_forever_outlined,
-              ),
-              label: const Text('Delete'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirmed != true) {
-      return;
-    }
-
-    if (deleteWholeMaster) {
-      final master = _findMasterBySl(item.masterSl);
-
-      if (master != null) {
-        await _deleteMaster(master);
-        return;
-      }
-    }
-
-    await _deleteProduct(item);
-  }
-
-  Future<void> _deleteProduct(
-      DeleteProductRow item,
-      ) async {
-    final int detailSl =
-    item.detailSl!;
-
-    final String key =
-        'detail_$detailSl';
-
-    if (deletingKey != null) {
-      return;
-    }
-
-    setState(() {
-      deletingKey = key;
-    });
-
+  Future<void> _deleteProduct(DeleteProductRow item) async {
+    if (item.detailSl == null || deleting) return;
+    final related = products.where((p) => p.masterSl == item.masterSl).toList();
+    final lastProduct = related.length == 1 && item.masterSl != null;
+    final ok = await _confirm('Delete ${item.itemCode}?', lastProduct
+      ? 'This is the last product in this display room. Delete the product and its master record?'
+      : 'Delete this product and its images permanently?');
+    if (!ok || !mounted) return;
+    setState(() => deleting = true);
     try {
-      final Uri uri =
-      Uri.parse(apiUrl).replace(
-        queryParameters: {
-          'p_detail_sl':
-          detailSl.toString(),
-        },
-      );
-
-      debugPrint('==========================================');
-      debugPrint('DELETE PRODUCT');
-      debugPrint('URL => $uri');
-      debugPrint('DETAIL SL => $detailSl');
-      debugPrint('==========================================');
-
-      final response = await DisplayRoomApiService.deleteProduct(detailSl);
-
-      debugPrint(
-        'DELETE STATUS => ${response.statusCode}',
-      );
-      debugPrint(
-        'DELETE RESPONSE => ${response.body}',
-      );
-
-      dynamic decoded;
-
-      try {
-        decoded =
-            jsonDecode(response.body);
-      } catch (_) {
-        decoded = null;
+      final response = lastProduct
+        ? await DisplayRoomApiService.deleteMaster(item.masterSl!)
+        : await DisplayRoomApiService.deleteProduct(item.detailSl!);
+      final data = _readResponse(response.body);
+      if (response.statusCode < 200 || response.statusCode >= 300 ||
+          (data is Map && data['status_code'] != null &&
+           data['status_code'].toString() != '200')) {
+        throw Exception(data is Map ? data['message'] ?? response.body : response.body);
       }
-
-      final dynamic apiStatus =
-      decoded is Map
-          ? decoded['status_code']
-          : null;
-
-      final String message =
-      decoded is Map
-          ? decoded['message']
-          ?.toString() ??
-          ''
-          : response.body;
-
-      final bool success =
-          response.statusCode >= 200 &&
-              response.statusCode < 300 &&
-              (
-                  apiStatus == null ||
-                      apiStatus == 200 ||
-                      apiStatus.toString() ==
-                          '200'
-              );
-
-      if (!mounted) {
-        return;
-      }
-
-      if (!success) {
-        _showMessage(
-          message.isEmpty
-              ? 'Delete failed.'
-              : message,
-          isError: true,
-        );
-        return;
-      }
-
-      _showMessage(
-        message.isEmpty
-            ? 'Product deleted successfully.'
-            : message,
-      );
-
-      await _loadDeleteData();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Deleted successfully')));
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      _showMessage(
-        'Delete failed: $e',
-        isError: true,
-      );
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')));
     } finally {
-      if (mounted) {
-        setState(() {
-          deletingKey = null;
-        });
-      }
+      if (mounted) setState(() => deleting = false);
     }
+    await _load();
   }
 
-  // ==========================================================================
-  // DELETE COMPLETE MASTER
-  // ==========================================================================
+  dynamic _readResponse(String text) {
+    try { return jsonDecode(text); } catch (_) { return text; }
+  }
 
-  Future<void> _deleteMaster(
-      DeleteMasterRow item,
-      ) async {
-    final int masterSl =
-    item.masterSl!;
-
-    final String key =
-        'master_$masterSl';
-
-    if (deletingKey != null) {
-      return;
-    }
-
-    setState(() {
-      deletingKey = key;
-    });
-
+  Future<void> _deleteMaster(DeleteMasterRow master) async {
+    if (master.masterSl == null || deleting) return;
+    final ok = await _confirm('Delete display room?',
+      'Delete ${master.displayRoomName} and all its products permanently?');
+    if (!ok || !mounted) return;
+    setState(() => deleting = true);
     try {
-      final Uri uri =
-      Uri.parse(apiUrl).replace(
-        queryParameters: {
-          'p_master_sl':
-          masterSl.toString(),
-        },
-      );
-
-      debugPrint('==========================================');
-      debugPrint('DELETE MASTER');
-      debugPrint('URL => $uri');
-      debugPrint('MASTER SL => $masterSl');
-      debugPrint('==========================================');
-
-      final response = await DisplayRoomApiService.deleteMaster(masterSl);
-
-      debugPrint(
-        'DELETE STATUS => ${response.statusCode}',
-      );
-      debugPrint(
-        'DELETE RESPONSE => ${response.body}',
-      );
-
-      dynamic decoded;
-
-      try {
-        decoded =
-            jsonDecode(response.body);
-      } catch (_) {
-        decoded = null;
+      final response = await DisplayRoomApiService.deleteMaster(master.masterSl!);
+      final data = _readResponse(response.body);
+      if (response.statusCode < 200 || response.statusCode >= 300 ||
+          (data is Map && data['status_code'] != null &&
+            data['status_code'].toString() != '200')) {
+        throw Exception(data is Map ? data['message'] ?? response.body : response.body);
       }
-
-      final dynamic apiStatus =
-      decoded is Map
-          ? decoded['status_code']
-          : null;
-
-      final String message =
-      decoded is Map
-          ? decoded['message']
-          ?.toString() ??
-          ''
-          : response.body;
-
-      final bool success =
-          response.statusCode >= 200 &&
-              response.statusCode < 300 &&
-              (
-                  apiStatus == null ||
-                      apiStatus == 200 ||
-                      apiStatus.toString() ==
-                          '200'
-              );
-
-      if (!mounted) {
-        return;
-      }
-
-      if (!success) {
-        _showMessage(
-          message.isEmpty
-              ? 'Item delete failed.'
-              : message,
-          isError: true,
-        );
-        return;
-      }
-
-      _showMessage(
-        message.isEmpty
-            ? 'Item deleted successfully.'
-            : message,
-      );
-
-      await _loadDeleteData();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Display room deleted')));
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      _showMessage(
-        'Delete failed: $e',
-        isError: true,
-      );
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')));
     } finally {
-      if (mounted) {
-        setState(() {
-          deletingKey = null;
-        });
-      }
+      if (mounted) setState(() => deleting = false);
     }
+    await _load();
   }
-
-  // ==========================================================================
-  // UI HELPERS
-  // ==========================================================================
-
-  Widget _buildProductImage(
-      String imageUrl,
-      ) {
-    if (imageUrl.isEmpty) {
-      return Container(
-        width: 76,
-        height: 76,
-        decoration: BoxDecoration(
-          color: Colors.grey.shade100,
-          borderRadius:
-          BorderRadius.circular(12),
-        ),
-        child: const Icon(
-          Icons.image_not_supported_outlined,
-          color: Colors.grey,
-        ),
-      );
-    }
-
-    return ClipRRect(
-      borderRadius:
-      BorderRadius.circular(12),
-      child: Image.network(
-        imageUrl,
-        width: 76,
-        height: 76,
-        fit: BoxFit.cover,
-        errorBuilder: (
-            context,
-            error,
-            stackTrace,
-            ) {
-          return Container(
-            width: 76,
-            height: 76,
-            color:
-            Colors.grey.shade100,
-            alignment:
-            Alignment.center,
-            child: const Icon(
-              Icons.broken_image_outlined,
-              color: Colors.grey,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildProductCard(
-      DeleteProductRow item,
-      ) {
-    final String key =
-        'detail_${item.detailSl}';
-
-    final bool deleting =
-        deletingKey == key ||
-            (item.masterSl != null &&
-                deletingKey == 'master_${item.masterSl}');
-
-    return Card(
-      margin:
-      const EdgeInsets.only(
-        bottom: 12,
-      ),
-      elevation: 0,
-      shape:
-      RoundedRectangleBorder(
-        borderRadius:
-        BorderRadius.circular(16),
-        side: BorderSide(
-          color:
-          Colors.grey.shade300,
-        ),
-      ),
-      child: Padding(
-        padding:
-        const EdgeInsets.all(14),
-        child: Row(
-          crossAxisAlignment:
-          CrossAxisAlignment.start,
-          children: [
-            _buildProductImage(
-              item.imageUrl,
-            ),
-
-            const SizedBox(width: 14),
-
-            Expanded(
-              child: Column(
-                crossAxisAlignment:
-                CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.description
-                        .isNotEmpty
-                        ? item.description
-                        : item.itemCode
-                        .isNotEmpty
-                        ? item.itemCode
-                        : 'Unnamed Product',
-                    maxLines: 2,
-                    overflow:
-                    TextOverflow.ellipsis,
-                    style:
-                    const TextStyle(
-                      fontSize: 15,
-                      fontWeight:
-                      FontWeight.w700,
-                    ),
-                  ),
-
-                  const SizedBox(height: 5),
-
-                  Text(
-                    item.itemCode.isEmpty
-                        ? 'Item Code: -'
-                        : 'Item Code: ${item.itemCode}',
-                    style:
-                    TextStyle(
-                      fontSize: 12,
-                      color: Colors
-                          .grey.shade700,
-                    ),
-                  ),
-
-                  const SizedBox(height: 8),
-
-                  Wrap(
-                    spacing: 7,
-                    runSpacing: 6,
-                    children: [
-                      _deleteChip(
-                        'Detail SL: '
-                            '${item.detailSl ?? '-'}',
-                      ),
-                      _deleteChip(
-                        'Master SL: '
-                            '${item.masterSl ?? '-'}',
-                      ),
-                      if (item
-                          .productCategory
-                          .isNotEmpty)
-                        _deleteChip(
-                          item.productCategory,
-                        ),
-                      if (item
-                          .business
-                          .isNotEmpty)
-                        _deleteChip(
-                          item.business,
-                        ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
-            const SizedBox(width: 12),
-
-            SizedBox(
-              height: 40,
-              child:
-              FilledButton.icon(
-                style:
-                FilledButton.styleFrom(
-                  backgroundColor:
-                  Colors.redAccent,
-                  foregroundColor:
-                  Colors.white,
-                ),
-                onPressed:
-                deletingKey != null
-                    ? null
-                    : () {
-                  _confirmDeleteProduct(
-                    item,
-                  );
-                },
-                icon: deleting
-                    ? const SizedBox(
-                  width: 17,
-                  height: 17,
-                  child:
-                  CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
-                  ),
-                )
-                    : const Icon(
-                  Icons
-                      .delete_outline_rounded,
-                  size: 18,
-                ),
-                label: Text(
-                  deleting
-                      ? 'Deleting...'
-                      : 'Delete',
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _deleteChip(
-      String text,
-      ) {
-    if (text.trim().isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      padding:
-      const EdgeInsets.symmetric(
-        horizontal: 8,
-        vertical: 4,
-      ),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius:
-        BorderRadius.circular(7),
-      ),
-      child: Text(
-        text,
-        style:
-        const TextStyle(
-          fontSize: 11,
-        ),
-      ),
-    );
-  }
-
-  void _showMessage(
-      String message, {
-        bool isError = false,
-      }) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(
-      SnackBar(
-        backgroundColor:
-        isError
-            ? Colors.red
-            : Colors.green,
-        content: Text(message),
-      ),
-    );
-  }
-
-  // ==========================================================================
-  // BUILD
-  // ==========================================================================
 
   @override
-  Widget build(
-      BuildContext context,
-      ) {
+  Widget build(BuildContext context) {
+    final query = searchController.text.trim().toLowerCase();
+    final filtered = products.where((p) => query.isEmpty ||
+      [p.itemCode, p.description, p.business, p.productCategory,
+        p.displayRoomName].any((value) => value.toLowerCase().contains(query))).toList();
     return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'Delete Display Room Item',
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'Refresh',
-            onPressed:
-            isLoading || deletingKey != null
-                ? null
-                : _loadDeleteData,
-            icon: const Icon(
-              Icons.refresh_rounded,
+      appBar: AppBar(title: const Text('Delete Products'), actions: [
+        IconButton(onPressed: isLoading || deleting ? null : _load,
+          icon: const Icon(Icons.refresh)),
+      ]),
+      body: Column(children: [
+        Padding(padding: const EdgeInsets.all(16), child: TextField(
+          controller: searchController,
+          decoration: const InputDecoration(prefixIcon: Icon(Icons.search),
+            hintText: 'Search item code, category, room...'),
+        )),
+        if (isLoading || deleting) const LinearProgressIndicator(),
+        if (error != null) Padding(padding: const EdgeInsets.all(16),
+          child: Text(error!, style: const TextStyle(color: Colors.red))),
+        Expanded(child: ListView(children: [
+          if (filtered.isNotEmpty) const Padding(
+            padding: EdgeInsets.all(12), child: Text('Products',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18))),
+          ...filtered.map((p) => Card(margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: ListTile(
+              title: Text(p.description.isEmpty ? p.itemCode : p.description),
+              subtitle: Text('${p.itemCode}  •  ${p.business}  •  ${p.displayRoomName}'),
+              trailing: IconButton(tooltip: 'Delete product',
+                onPressed: deleting ? null : () => _deleteProduct(p),
+                icon: const Icon(Icons.delete_forever, color: Colors.redAccent)),
             ),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: Column(
-        children: [
-          Container(
-            width: double.infinity,
-            margin: const EdgeInsets.fromLTRB(
-              16,
-              16,
-              16,
-              0,
+          )),
+          const Padding(padding: EdgeInsets.all(12), child: Text('Display rooms',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18))),
+          ...masters.where((m) => query.isEmpty ||
+            [m.displayRoomName, m.business].any((x) => x.toLowerCase().contains(query)))
+          .map((m) => Card(margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: ListTile(
+              title: Text(m.displayRoomName.isEmpty ? m.displayRoomNo : m.displayRoomName),
+              subtitle: Text('${m.business}  •  ${m.detailsCount} products'),
+              trailing: IconButton(tooltip: 'Delete display room',
+                onPressed: deleting ? null : () => _deleteMaster(m),
+                icon: const Icon(Icons.delete_outline, color: Colors.redAccent)),
             ),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.red.shade50,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: Colors.red.shade100,
-              ),
-            ),
-            child: const Row(
-              crossAxisAlignment:
-              CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  Icons.warning_amber_rounded,
-                  color: Colors.redAccent,
-                ),
-                SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Delete operation permanent. '
-                        'একটি product delete করলে ওই product + images delete হবে. '
-                        'যদি সেটি Display Room-এর শেষ product হয়, '
-                        'empty master record-ও automatically delete হবে.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.4,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              16,
-              14,
-              16,
-              10,
-            ),
-            child: TextField(
-              controller: searchController,
-              decoration: InputDecoration(
-                hintText:
-                'Search item code, description, room, SL...',
-                prefixIcon: const Icon(
-                  Icons.search_rounded,
-                ),
-                suffixIcon:
-                searchController.text.isNotEmpty
-                    ? IconButton(
-                  onPressed:
-                  searchController.clear,
-                  icon: const Icon(
-                    Icons.close_rounded,
-                  ),
-                )
-                    : null,
-                border: OutlineInputBorder(
-                  borderRadius:
-                  BorderRadius.circular(12),
-                ),
-              ),
-            ),
-          ),
-          Expanded(
-            child: isLoading
-                ? const Center(
-              child:
-              CircularProgressIndicator(),
-            )
-                : RefreshIndicator(
-              onRefresh: _loadDeleteData,
-              child:
-              filteredProducts.isEmpty
-                  ? ListView(
-                physics:
-                const AlwaysScrollableScrollPhysics(),
-                children:
-                const [
-                  SizedBox(
-                    height: 180,
-                  ),
-                  Icon(
-                    Icons
-                        .inventory_2_outlined,
-                    size: 60,
-                    color:
-                    Colors.grey,
-                  ),
-                  SizedBox(
-                    height: 12,
-                  ),
-                  Center(
-                    child: Text(
-                      'No items found.',
-                    ),
-                  ),
-                ],
-              )
-                  : ListView.builder(
-                physics:
-                const AlwaysScrollableScrollPhysics(),
-                padding:
-                const EdgeInsets.fromLTRB(
-                  16,
-                  0,
-                  16,
-                  30,
-                ),
-                itemCount:
-                filteredProducts.length,
-                itemBuilder:
-                    (
-                    context,
-                    index,
-                    ) {
-                  return _buildProductCard(
-                    filteredProducts[
-                    index],
-                  );
-                },
-              ),
-            ),
-          ),
-        ],
-      ),
+          )),
+        ])),
+      ]),
     );
   }
 
   @override
   void dispose() {
-    searchController
-        .removeListener(
-      _applyFilter,
-    );
     searchController.dispose();
     super.dispose();
   }
