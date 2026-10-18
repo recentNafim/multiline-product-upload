@@ -1054,10 +1054,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       assigneeController.text.trim(),
     );
 
-    if (organizationId == null) {
-      showError(
-        'Valid Organization ID দিন',
-      );
+    // Manual upload: Organization ID may be omitted.
+    // Excel upload: ORG is still a mandatory workbook column and the
+    // organization ID auto-filled from the validated first Excel row.
+    final organizationText = organizationIdController.text.trim();
+    if (organizationText.isNotEmpty &&
+        (organizationId == null || organizationId <= 0)) {
+      showError('Valid numeric Organization ID দিন');
+      return;
+    }
+    if (excelDetails.isNotEmpty && organizationId == null) {
+      showError('Excel upload-এর জন্য Organization ID required');
       return;
     }
 
@@ -1176,8 +1183,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       "sub_category":
       subCategoryController.text.trim(),
 
-      "organization_id":
-      organizationId,
+      // Leave the optional master field out of JSON when not provided.
+      if (organizationId != null)
+        "organization_id": organizationId,
 
 
       "display_room_name":
@@ -1954,13 +1962,24 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
                 twoFields(
                   first: buildTextField(
-                    label:
-                    'Organization ID',
-                    hint: 'e.g. 3941',
-                    controller:
-                    organizationIdController,
-                    keyboardType:
-                    TextInputType.number,
+                    label: 'Organization ID (Optional)',
+                    hint: 'Optional, e.g. 3941',
+                    controller: organizationIdController,
+                    keyboardType: TextInputType.number,
+                    required: false,
+                    validator: (value) {
+                      final text = (value ?? '').trim();
+                      if (text.isEmpty) {
+                        return excelDetails.isNotEmpty
+                            ? 'Organization ID is required for Excel upload'
+                            : null;
+                      }
+                      final id = int.tryParse(text);
+                      if (id == null || id <= 0) {
+                        return 'Enter a valid numeric Organization ID';
+                      }
+                      return null;
+                    },
                   ),
                   second: buildTextField(
                     label: 'Created By',
