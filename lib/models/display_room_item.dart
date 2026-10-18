@@ -77,7 +77,10 @@ class DisplayRoomItem {
       subInventoryCode: s(detail['sub_inventory_code']), locatorId: i(detail['locator_id']),
       cbm: s(detail['cbm']), fob: d(detail['fob']), weight: d(detail['weight']),
       materialSpecification: s(detail['material_specification']),
-      sizeRange: s(detail['size_range'] ?? detail['sizeRange']), images: photos,
+      sizeRange: s(
+        detail['size_range'] ?? detail['SIZE_RANGE'] ?? detail['sizeRange'] ??
+        master['size_range'] ?? master['SIZE_RANGE'] ?? master['sizeRange'],
+      ), images: photos,
     );
   }
 }
