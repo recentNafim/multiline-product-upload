@@ -65,3 +65,33 @@ Map<String, dynamic> platformFileToImageJson(PlatformFile file) {
     'mime_type': mimeTypeFromFileName(file.name),
   };
 }
+
+/// Standard client size-range format: 36-42 (decimal sizes like 6.5-10 also work).
+/// Spaces and typographic dashes are normalized to the ASCII hyphen used by
+/// the Oracle API. Do not convert sizes into dates or two separate fields.
+String normalizeSizeRange(dynamic value) {
+  return asText(value)
+      .trim()
+      .replaceAll(RegExp(r'\s*[-–—]\s*'), '-');
+}
+
+/// Return null when the size range is a valid number-number interval.
+String? validateSizeRange(dynamic value) {
+  final String range = normalizeSizeRange(value);
+  if (range.isEmpty) {
+    return 'Size Range is mandatory (e.g. 36-42)';
+  }
+
+  final match = RegExp(r'^([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)$')
+      .firstMatch(range);
+  if (match == null) {
+    return 'Use numeric Size Range like 36-42 (not S-XL)';
+  }
+
+  final double lower = double.parse(match.group(1)!);
+  final double upper = double.parse(match.group(2)!);
+  if (lower > upper) {
+    return 'Lower size must not be greater than upper size';
+  }
+  return null;
+}

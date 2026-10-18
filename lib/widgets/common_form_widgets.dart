@@ -7,6 +7,7 @@ Widget buildTextField({
   TextInputType keyboardType = TextInputType.text,
   int maxLines = 1,
   bool required = true,
+  FormFieldValidator<String>? validator,
 }) => TextFormField(
   controller: controller,
   keyboardType: keyboardType,
@@ -18,8 +19,9 @@ Widget buildTextField({
     border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
   ),
-  validator: (value) {
-    if (required && (value == null || value.trim().isEmpty)) {
+    validator: (value) {
+      if (validator != null) return validator(value);
+      if (required && (value == null || value.trim().isEmpty)) {
       return '$label is required';
     }
     return null;

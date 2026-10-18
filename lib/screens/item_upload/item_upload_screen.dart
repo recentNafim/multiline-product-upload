@@ -89,8 +89,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   final fobController = TextEditingController();
   final materialSpecificationController = TextEditingController();
   final weightController = TextEditingController();
-  final lowerSizeController = TextEditingController();
-  final upperSizeController = TextEditingController();
+  final sizeRangeController = TextEditingController();
   final moqController = TextEditingController();
 
   @override
@@ -108,44 +107,6 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
 
 
-
-  // Size bounds are separate for users, but remain one size_range API field.
-  // This keeps the existing Oracle POST/GET contract backward compatible.
-  String _combineSizeBounds(dynamic lower, dynamic upper) {
-    final min = asText(lower).trim();
-    final max = asText(upper).trim();
-    if (min.isEmpty || max.isEmpty) return '';
-    return '$min-$max';
-  }
-
-  bool _isSizeOrderInvalid(dynamic lower, dynamic upper) {
-    final min = asText(lower).trim();
-    final max = asText(upper).trim();
-    final numericMin = double.tryParse(min);
-    final numericMax = double.tryParse(max);
-    if (numericMin != null && numericMax != null) {
-      return numericMin > numericMax;
-    }
-    const clothingSizes = <String, int>{
-      'XXXS': 0, 'XXS': 1, 'XS': 2, 'S': 3, 'M': 4,
-      'L': 5, 'XL': 6, 'XXL': 7, '2XL': 7,
-      'XXXL': 8, '3XL': 8, '4XL': 9, '5XL': 10,
-    };
-    final first = clothingSizes[min.toUpperCase()];
-    final last = clothingSizes[max.toUpperCase()];
-    return first != null && last != null && first > last;
-  }
-
-  // Older single-column Excel imports can still populate the preview inputs.
-  List<String> _legacySizeBounds(dynamic value) {
-    final text = asText(value).trim();
-    if (text.isEmpty) return <String>['', ''];
-    final parts = text.split(RegExp(r'\s*(?:-|–|—|\s+to\s+)\s*', caseSensitive: false));
-    if (parts.length == 2 && parts.every((part) => part.trim().isNotEmpty)) {
-      return parts.map((part) => part.trim()).toList();
-    }
-    return <String>['', ''];
-  }
 
   // ============================================================
   // IMAGE HELPERS
@@ -638,23 +599,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         final missing = <String>[];
         for (final key in const <String>[
           'BUSINESS', 'ITEM CATEGORY', 'ITEM CODE', 'ORG',
-          'FOB', 'PICTURE', 'MOQ',
+          'FOB', 'PICTURE', 'SIZE RANGE', 'MOQ',
         ]) {
           if (asText(row[key]).isEmpty) missing.add(key);
-        }
-        // New template: LOWER SIZE and UPPER SIZE are both mandatory.
-        // Backward compatibility: old template containing only SIZE RANGE.
-        final legacyOnly = !row.containsKey('LOWER SIZE') &&
-            !row.containsKey('UPPER SIZE') &&
-            asText(row['SIZE RANGE']).isNotEmpty;
-        if (!legacyOnly) {
-          if (asText(row['LOWER SIZE']).isEmpty) missing.add('LOWER SIZE');
-          if (asText(row['UPPER SIZE']).isEmpty) missing.add('UPPER SIZE');
-          if (asText(row['LOWER SIZE']).isNotEmpty &&
-              asText(row['UPPER SIZE']).isNotEmpty &&
-              _isSizeOrderInvalid(row['LOWER SIZE'], row['UPPER SIZE'])) {
-            failures.add('Row ${index + 2}: LOWER SIZE cannot exceed UPPER SIZE');
-          }
         }
         if (missing.isNotEmpty) {
           failures.add('Row ${index + 2}: missing ${missing.join(', ')}');
@@ -673,6 +620,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
             (asDouble(row['MOQ']) == null || asDouble(row['MOQ'])! <= 0)) {
           failures.add('Row ${index + 2}: MOQ must be greater than zero');
         }
+         final sizeRangeIssue = validateSizeRange(row['SIZE RANGE']);
+         if (sizeRangeIssue != null) {
+           failures.add('Row ${index + 2}: $sizeRangeIssue');
+         }
         if (asText(row['BUSINESS']).toLowerCase() != firstBusiness ||
             asInt(row['ORG']) != firstOrg) {
           failures.add('Row ${index + 2}: Business/ORG differs from the first row');
@@ -758,11 +709,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         firstRow['WEIGHT'],
       );
 
-      final oldBounds = _legacySizeBounds(firstRow['SIZE RANGE']);
-      setControllerIfAvailable(lowerSizeController,
-          firstRow['LOWER SIZE'] ?? oldBounds[0]);
-      setControllerIfAvailable(upperSizeController,
-          firstRow['UPPER SIZE'] ?? oldBounds[1]);
+       setControllerIfAvailable(
+         sizeRangeController,
+         normalizeSizeRange(firstRow['SIZE RANGE']),
+       );
       setControllerIfAvailable(moqController, firstRow['MOQ']);
 
       // ========================================================
@@ -802,12 +752,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
              row['ITEM CODE'],
            ),
 
-           // Two Excel columns -> one existing Oracle size_range field.
-           // Old SIZE RANGE-only sheets remain supported.
-           "size_range": _combineSizeBounds(
-                   row['LOWER SIZE'], row['UPPER SIZE']).isNotEmpty
-               ? _combineSizeBounds(row['LOWER SIZE'], row['UPPER SIZE'])
-               : asText(row['SIZE RANGE']).trim(),
+           // One Excel SIZE RANGE cell -> one Oracle size_range field.
+           "size_range": normalizeSizeRange(row['SIZE RANGE']),
            "moq": asDouble(row['MOQ']),
            "quantity": asDouble(row['MOQ']),
 
@@ -980,8 +926,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
        weightController.text.trim(),
        ),
 
-       "size_range": _combineSizeBounds(
-         lowerSizeController.text, upperSizeController.text),
+       "size_range": normalizeSizeRange(sizeRangeController.text),
        "moq": double.tryParse(moqController.text.trim()),
        "quantity": double.tryParse(moqController.text.trim()),
 
@@ -1016,7 +961,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     final String sizeRange = asText(
       detail['size_range'] ?? detail['sizeRange'] ?? detail['SIZE RANGE'],
     ).trim();
-    detail['size_range'] = sizeRange;
+     detail['size_range'] = normalizeSizeRange(sizeRange);
     detail.remove('sizeRange');
     detail.remove('SIZE RANGE');
 
@@ -1190,18 +1135,15 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
          showError('Picture is mandatory');
          return;
        }
-       if (lowerSizeController.text.trim().isEmpty ||
-           upperSizeController.text.trim().isEmpty ||
-           double.tryParse(moqController.text.trim()) == null ||
+       if (validateSizeRange(sizeRangeController.text) != null ||
+            double.tryParse(moqController.text.trim()) == null ||
            double.tryParse(moqController.text.trim())! <= 0 ||
            double.tryParse(fobController.text.trim()) == null ||
            double.tryParse(fobController.text.trim())! < 0) {
-         showError('Lower Size, Upper Size, MOQ (> 0) and FOB are mandatory');
-         return;
-       }
-       if (_isSizeOrderInvalid(
-           lowerSizeController.text, upperSizeController.text)) {
-         showError('Lower Size cannot be greater than Upper Size');
+          showError(
+            validateSizeRange(sizeRangeController.text) ??
+            'MOQ (> 0) and valid FOB are mandatory',
+          );
          return;
        }
        details = [createManualDetail()];
@@ -1214,10 +1156,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       final String sizeRange = asText(
         raw['size_range'] ?? raw['sizeRange'] ?? raw['SIZE RANGE'],
       ).trim();
-      if (sizeRange.isEmpty) {
-        showError('Row ${index + 1}: Size Range is mandatory');
-        return;
-      }
+       final issue = validateSizeRange(sizeRange);
+       if (issue != null) {
+         showError('Row ${index + 1}: $issue');
+         return;
+       }
     }
 
     // Final normalization before JSON encode / HTTP POST.
@@ -2181,26 +2124,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
                  twoFields(
                    first: buildTextField(
-                     label: 'Lower Size',
-                     hint: 'e.g. 36 or S',
-                     controller: lowerSizeController,
-                     // Excel rows are validated independently, including old templates.
-                     required: excelDetails.isEmpty,
+                     label: 'Size Range',
+                      hint: 'e.g. 36-42',
+                     controller: sizeRangeController,
+                      validator: (value) => validateSizeRange(value),
                    ),
                    second: buildTextField(
-                     label: 'Upper Size',
-                     hint: 'e.g. 42 or XL',
-                     controller: upperSizeController,
-                     // Excel rows are validated independently, including old templates.
-                     required: excelDetails.isEmpty,
+                     label: 'MOQ',
+                     hint: 'e.g. 250',
+                     controller: moqController,
+                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                    ),
-                 ),
-                 gap(),
-                 buildTextField(
-                   label: 'MOQ',
-                   hint: 'e.g. 250',
-                   controller: moqController,
-                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
                  ),
 
                  gap(),
@@ -2285,8 +2219,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     fobController.dispose();
     materialSpecificationController.dispose();
     weightController.dispose();
-     lowerSizeController.dispose();
-     upperSizeController.dispose();
+     sizeRangeController.dispose();
      moqController.dispose();
 
     super.dispose();
