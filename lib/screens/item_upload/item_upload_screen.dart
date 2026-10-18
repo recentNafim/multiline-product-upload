@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import '../../core/constants/api_constants.dart';
 import '../../services/display_room_api_service.dart';
 import '../../utils/excel_value_utils.dart';
+import '../../utils/excel_embedded_pictures.dart';
+import '../../utils/auto_image_file_name.dart';
 import '../../widgets/common_form_widgets.dart';
 import '../../widgets/excel_data_table_preview.dart';
 
@@ -137,13 +139,15 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       return <Map<String, dynamic>>[];
     }
 
-    final lowerNames = expectedNames.map((e) => e.toLowerCase()).toSet();
-
-    return selectedExcelImages
-        .where(
-          (file) =>
-      file.bytes != null && lowerNames.contains(file.name.toLowerCase()),
-    )
+    // Follow the order of images in this Excel row (not the order in which
+    // files were selected); this determines image number 01, 02, ...
+    final filesByName = <String, PlatformFile>{
+      for (final file in selectedExcelImages)
+        if (file.bytes != null) file.name.toLowerCase(): file,
+    };
+    return expectedNames
+        .map((name) => filesByName[name.toLowerCase()])
+        .whereType<PlatformFile>()
         .take(5)
         .map(platformFileToImageJson)
         .toList();
@@ -528,6 +532,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         );
       }
 
+      // Embedded Excel pictures have no cell value. Match drawing anchors to
+      // the PICTURE column, then reuse the normal image upload pipeline.
+      final pictureColumnIndex = headers.indexOf('PICTURE') >= 0
+          ? headers.indexOf('PICTURE')
+          : headers.indexOf('IMAGE');
+      final embeddedPictures = readExcelEmbeddedPictures(
+        file.bytes!,
+        pictureColumnIndex: pictureColumnIndex,
+      );
+      final embeddedFilesUsed = <PlatformFile>[];
+
       debugPrint('Excel Headers: $headers');
 
       // ========================================================
@@ -567,11 +582,6 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           row[header] = value;
         }
 
-        // Ignore only fully blank rows. A partially populated row must fail
-        // required-field validation rather than silently disappearing.
-        if (row.values.every((value) => asText(value).isEmpty)) {
-          continue;
-        }
         if (asText(row['ITEM CATEGORY']).isEmpty) {
           row['ITEM CATEGORY'] = row['PRODUCT CATEGORY'];
         }
@@ -580,6 +590,19 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         }
         if (asText(row['PICTURE']).isEmpty) {
           row['PICTURE'] = row['IMAGE'];
+        }
+        // The user may paste a real JPEG/PNG object directly on the cell.
+        // When no filename is supplied, import its bytes automatically.
+        final inlinePictures = embeddedPictures[rowIndex] ?? <PlatformFile>[];
+        if (inlinePictures.isNotEmpty) {
+          // Embedded pictures take precedence over any text or old filename.
+          // The user does not need to type a picture filename in Excel.
+          row['PICTURE'] = inlinePictures.map((f) => f.name).join(';');
+          embeddedFilesUsed.addAll(inlinePictures);
+        }
+        // Ignore only fully blank rows, after considering embedded images.
+        if (row.values.every((value) => asText(value).isEmpty)) {
+          continue;
         }
         row['SERIAL'] = rows.length + 1; // Preview sequence, never DB PK.
         rows.add(row);
@@ -741,6 +764,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           // Internal helper. API পাঠানোর আগে remove করা হবে।
           "_image_names":
           imageNames,
+          // Auto-generated preview SERIAL is the image filename serial.
+          // This metadata must never be included in the Oracle POST.
+          "_excel_serial": asInt(row['SERIAL']) ?? 1,
 
           // Excel-এর 3D MODEL / GLB filename.
           // API পাঠানোর আগে actual Base64 payload দিয়ে replace হবে।
@@ -789,6 +815,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       }).toList();
 
       setState(() {
+        // Reset pictures from a previous workbook. The embedded images are
+        // already decoded bytes and DO NOT need separate file selection.
+        selectedExcelImages
+          ..clear()
+          ..addAll(embeddedFilesUsed);
         selectedExcelName = file.name;
         excelDetails = details;
         const hiddenLegacyHeaders = <String>{
@@ -977,6 +1008,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       final text = weightValue.trim();
       detail['weight'] = text.isEmpty ? null : double.tryParse(text);
     }
+
+    // Internal upload/Excel metadata must never reach Oracle.
+    detail.remove('_excel_serial');
 
     return detail;
   }
@@ -1172,9 +1206,30 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
     // Final normalization before JSON encode / HTTP POST.
     // This guarantees CBM and SIZE_RANGE are always JSON strings.
-    final normalizedDetails = details
-        .map(_normalizeDetailForApi)
-        .toList();
+    final DateTime uploadTime = DateTime.now();
+    late final List<Map<String, dynamic>> normalizedDetails;
+    try {
+      normalizedDetails = <Map<String, dynamic>>[
+        for (var index = 0; index < details.length; index++)
+          _normalizeDetailForApi(<String, dynamic>{
+            ...details[index],
+            // Excel: use its automatic SERIAL. Manual entry: serial 1.
+            // Never send internal _excel_serial to the Oracle API.
+            'images': assignAutomaticImageFileNames(
+              images: details[index]['images'] is List
+                  ? details[index]['images'] as List
+                  : <dynamic>[],
+              itemCode: asText(details[index]['item_code']),
+              itemName: asText(details[index]['description']),
+              excelSerial: asInt(details[index]['_excel_serial']) ?? index + 1,
+              uploadTime: uploadTime,
+            ),
+          }),
+      ];
+    } on FormatException catch (error) {
+      showError('Picture file naming failed: ${error.message}');
+      return;
+    }
 
     final Map<String, dynamic> body = {
       "business":
@@ -1492,15 +1547,16 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               label: Text(
                 isReadingExcelImages
                     ? 'Reading Images...'
-                    : 'Select Excel Image Files',
+                    : 'Select Images (Legacy Excel Only)',
               ),
             ),
 
             const SizedBox(height: 8),
 
             Text(
-              'Excel-এর IMAGE column-এর filename-এর সাথে selected image file match হবে. '
-                  'একটি cell-এ multiple image হলে comma/semicolon দিয়ে filename লিখতে পারবেন.',
+              'PICTURE cell-এ ছবি paste করুন; filename লিখতে হবে না। '
+                  'Upload করার সময় Item Code + Item Name + Serial + Image Number + Date + Time অনুযায়ী filename তৈরি হবে। '
+                  'পুরোনো filename-based Excel-ও support করবে।',
               style: TextStyle(
                 fontSize: 12,
                 color: Colors.grey.shade600,
