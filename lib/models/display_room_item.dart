@@ -49,6 +49,26 @@ class DisplayRoomItem {
     String s(dynamic v) => v?.toString().trim() ?? '';
     int? i(dynamic v) => v is num ? v.toInt() : int.tryParse(s(v));
     double? d(dynamic v) => v is num ? v.toDouble() : double.tryParse(s(v));
+    // Read both traditional ORDS snake_case and uppercase / camelCase keys.
+    dynamic byNormalizedKey(Map<String, dynamic> map, Set<String> expected) {
+      for (final entry in map.entries) {
+        final key = entry.key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+        if (expected.contains(key) && s(entry.value).isNotEmpty) {
+          return entry.value;
+        }
+      }
+      return null;
+    }
+    final sizeRangeValue = byNormalizedKey(
+      detail, const {'sizerange', 'sizewise', 'sizewiserange'},
+    ) ?? byNormalizedKey(
+      master, const {'sizerange', 'sizewise', 'sizewiserange'},
+    );
+    final explicitMoq = byNormalizedKey(
+      detail, const {'moq', 'minimumorderquantity', 'minimumqty'},
+    ) ?? byNormalizedKey(
+      master, const {'moq', 'minimumorderquantity', 'minimumqty'},
+    );
     final rawImages = detail['images'];
     final photos = <String>[];
     if (rawImages is List) {
@@ -73,14 +93,11 @@ class DisplayRoomItem {
       fileUrl: s(detail['file_url']), fileName: s(detail['file_name']),
       mimeType: s(detail['mime_type']), itemCode: s(detail['item_code']),
       description: s(detail['description']), uom: s(detail['uom']),
-      quantity: d(detail['moq'] ?? detail['quantity']), unitPrice: d(detail['unit_price']),
+      quantity: d(explicitMoq ?? detail['quantity']), unitPrice: d(detail['unit_price']),
       subInventoryCode: s(detail['sub_inventory_code']), locatorId: i(detail['locator_id']),
       cbm: s(detail['cbm']), fob: d(detail['fob']), weight: d(detail['weight']),
       materialSpecification: s(detail['material_specification']),
-      sizeRange: s(
-        detail['size_range'] ?? detail['SIZE_RANGE'] ?? detail['sizeRange'] ??
-        master['size_range'] ?? master['SIZE_RANGE'] ?? master['sizeRange'],
-      ), images: photos,
+      sizeRange: s(sizeRangeValue), images: photos,
     );
   }
 }

@@ -3,12 +3,14 @@ import 'dart:convert';
 import 'package:excel/excel.dart' as xls;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../../core/constants/api_constants.dart';
 import '../../services/display_room_api_service.dart';
 import '../../utils/excel_value_utils.dart';
 import '../../utils/excel_embedded_pictures.dart';
 import '../../utils/auto_image_file_name.dart';
+import '../../utils/image_resolution.dart';
 import '../../widgets/common_form_widgets.dart';
 import '../../widgets/excel_data_table_preview.dart';
 
@@ -29,6 +31,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   bool isReadingExcel = false;
 
   String? selectedExcelName;
+
+  // Remains visible after the upload form is cleared.
+  String? _submissionNotice;
 
   /// Excel select করলে API payload-এর জন্য mapped detail এখানে থাকবে।
   List<Map<String, dynamic>> excelDetails = [];
@@ -151,6 +156,77 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         .take(5)
         .map(platformFileToImageJson)
         .toList();
+  }
+
+  /// Stops silent low-quality uploads. Existing Excel cells may contain
+  /// thumbnail JPEGs (e.g. 92x69) even though Excel draws them quite large.
+  /// Let the user explicitly continue only after seeing the real dimensions.
+  Future<bool> _confirmImageQualityBeforeUpload() async {
+    final bool excelMode = excelDetails.isNotEmpty;
+    final List<PlatformFile> files;
+    if (excelMode) {
+      final expected = <String>{
+        for (final detail in excelDetails)
+          if (detail['_image_names'] is List)
+            for (final name in detail['_image_names'] as List)
+              name.toString().trim().toLowerCase(),
+      };
+      files = selectedExcelImages
+          .where((file) => expected.contains(file.name.toLowerCase()))
+          .toList();
+    } else {
+      files = List<PlatformFile>.from(selectedImages);
+    }
+
+    final issues = <String>[];
+    for (final file in files) {
+      final resolution = await readImageResolution(file.bytes);
+      if (resolution != null && resolution.isLowResolution) {
+        issues.add('${file.name}: ${resolution.width} x ${resolution.height}');
+      }
+    }
+    if (issues.isEmpty) return true;
+    if (!mounted) return false;
+
+    final decision = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 8),
+            Expanded(child: Text('Low-resolution pictures')),
+          ],
+        ),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: SingleChildScrollView(
+            child: Text(
+              'These pictures are too small for the Dashboard:\n\n'
+              '${issues.take(8).join('\n')}'
+              '${issues.length > 8 ? '\n...and ${issues.length - 8} more' : ''}'
+              '\n\nFor sharp product pictures, use the original JPG/PNG '
+              '(preferably 1200x900 pixels or better). '
+              'If they were pasted from a thumbnail, replace them in Excel '
+              'using Insert > Pictures > This Device.\n\n'
+              'You may still upload, but the resulting image will remain blurry.',
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel - replace pictures'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Upload anyway'),
+          ),
+        ],
+      ),
+    );
+    return decision == true;
   }
 
   // ============================================================
@@ -1065,6 +1141,74 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     return copy;
   }
 
+  /// Clear all workbook, image and form state ONLY after a confirmed success.
+  /// Keep every field unchanged if the request fails so the user can retry.
+  void _clearEntryAfterSuccess({required String notice}) {
+    final controllers = <TextEditingController>[
+      businessController,
+      subCategoryController,
+      organizationIdController,
+      displayRoomNameController,
+      createdByController,
+      statusController,
+      assigneeController,
+      productCategoryController,
+      itemCodeController,
+      descriptionController,
+      uomController,
+      subInventoryCodeController,
+      cbmController,
+      fobController,
+      materialSpecificationController,
+      weightController,
+      sizeRangeController,
+      moqController,
+    ];
+    // Reset field errors first: TextFormField.reset() can restore its initial
+    // controller value, so controllers must be cleared AFTER FormState.reset().
+    _formKey.currentState?.reset();
+    for (final controller in controllers) {
+      controller.clear();
+    }
+    statusController.text = 'ACTIVE';
+    setState(() {
+      selectedExcelName = null;
+      excelDetails = <Map<String, dynamic>>[];
+      excelTableHeaders = <String>[];
+      excelTableRows = <Map<String, dynamic>>[];
+      selectedExcelImages.clear();
+      selectedImages.clear();
+      selectedExcel3DModels.clear();
+      selected3DModel = null;
+      _submissionNotice = notice;
+    });
+  }
+
+  bool _isConfirmedApiSuccess(http.Response response, dynamic decoded) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return false;
+    }
+    if (decoded is! Map) return true;
+    final rawStatus = decoded['status_code'] ?? decoded['STATUS_CODE'];
+    if (rawStatus != null &&
+        !{'200', '201', '202', '204', 'S', 'SUCCESS'}
+            .contains(rawStatus.toString().trim().toUpperCase())) {
+      return false;
+    }
+    final returnStatus = decoded['return_status'] ?? decoded['RETURN_STATUS'];
+    if (returnStatus != null &&
+        !{'S', 'SUCCESS', '200', '201'}
+            .contains(returnStatus.toString().trim().toUpperCase())) {
+      return false;
+    }
+    final explicitSuccess = decoded['success'];
+    if (explicitSuccess == false ||
+        explicitSuccess?.toString().toLowerCase() == 'false') {
+      return false;
+    }
+    return true;
+  }
+
   // ============================================================
   // API SUBMIT
   // ============================================================
@@ -1282,6 +1426,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     );
     debugPrint('==========================================');
 
+    // Validate original pixel dimensions before the HTTP request.
+    // This never compresses/resizes the image or changes auto-generated names.
+    if (!await _confirmImageQualityBeforeUpload()) return;
+    if (!mounted) return;
+
     setState(() {
       isLoading = true;
     });
@@ -1307,42 +1456,50 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         json = null;
       }
 
-      final apiStatus =
-      json is Map
-          ? json['status_code']
-          : null;
-
-      final message =
-      json is Map
-          ? json['message']
-          ?.toString() ??
-          'Request completed'
+      final String message = json is Map
+          ? (json['message'] ?? json['MESSAGE'] ?? '').toString()
           : response.body;
-
-      final success =
-          response.statusCode >= 200 &&
-              response.statusCode < 300 &&
-              (
-                  apiStatus == null ||
-                      apiStatus == 200 ||
-                      apiStatus.toString() ==
-                          '200'
-              );
+      final bool success = _isConfirmedApiSuccess(response, json);
 
       if (!mounted) {
         return;
       }
 
       if (success) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(
-          SnackBar(
-            backgroundColor: Colors.green,
-            content: Text(
-              excelDetails.isNotEmpty
-                  ? '$message\n${excelDetails.length} items uploaded.'
-                  : message,
+        final bool wasExcelUpload = excelDetails.isNotEmpty;
+        final int uploadedCount = normalizedDetails.length;
+        final notice = wasExcelUpload
+            ? 'Excel Uploaded Successfully ($uploadedCount items)'
+            : 'Submitted Successfully';
+
+        _clearEntryAfterSuccess(notice: notice);
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.hideCurrentSnackBar();
+        messenger.showSnackBar(SnackBar(
+          backgroundColor: const Color(0xFF15803D),
+          duration: const Duration(seconds: 7),
+          content: Text(notice),
+        ));
+        // Acknowledgement dialog stays on screen until explicitly closed.
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Color(0xFF15803D)),
+                SizedBox(width: 10),
+                Expanded(child: Text('Submitted Successfully')),
+              ],
             ),
+            content: Text(wasExcelUpload
+                ? '$uploadedCount Excel items uploaded successfully.\nThe entry page is now cleared.'
+                : 'Product uploaded successfully.\nThe entry page is now cleared.'),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('OK'),
+              ),
+            ],
           ),
         );
       } else {
@@ -1945,6 +2102,28 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               crossAxisAlignment:
               CrossAxisAlignment.stretch,
               children: [
+                if (_submissionNotice != null) ...[
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFECFDF5),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFF86EFAC)),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.check_circle, color: Color(0xFF15803D)),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text(_submissionNotice!,
+                          style: const TextStyle(fontWeight: FontWeight.w700))),
+                      IconButton(
+                        tooltip: 'Dismiss',
+                        onPressed: () => setState(() => _submissionNotice = null),
+                        icon: const Icon(Icons.close, size: 18),
+                      ),
+                    ]),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 // ==================================================
                 // EXCEL = OPTIONAL ONLY
                 // ==================================================
