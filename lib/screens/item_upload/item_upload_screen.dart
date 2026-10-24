@@ -54,6 +54,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   /// একসাথে অনেক image file select করা যাবে। Backend limit প্রতি item-এ 5।
   final List<PlatformFile> selectedExcelImages = [];
 
+  // Original full-resolution files override embedded Excel thumbnails.
+  // Key is the automatically generated Excel SERIAL, not a filename.
+  // No extra Excel column or user-entered filename is needed.
+  final Map<int, List<PlatformFile>> originalExcelPhotosBySerial = {};
+  final Map<int, List<String>> originalExcelPhotoDimensions = {};
+  int? readingOriginalPhotosForSerial;
+
   bool isReadingImages = false;
   bool isReadingExcelImages = false;
 
@@ -131,6 +138,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   List<Map<String, dynamic>> _excelImagesPayloadForDetail(
       Map<String, dynamic> detail,
       ) {
+    final int serial = asInt(detail['_excel_serial']) ?? 0;
+    final originals = originalExcelPhotosBySerial[serial];
+    if (originals != null && originals.isNotEmpty) {
+      // EXACT original selected bytes. No resizing, thumbnail extraction,
+      // recompression, image conversion, or quality reduction.
+      return originals.map(platformFileToImageJson).toList();
+    }
     final rawNames = detail['_image_names'];
 
     final List<String> expectedNames = rawNames is List
@@ -165,15 +179,27 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     final bool excelMode = excelDetails.isNotEmpty;
     final List<PlatformFile> files;
     if (excelMode) {
-      final expected = <String>{
-        for (final detail in excelDetails)
-          if (detail['_image_names'] is List)
-            for (final name in detail['_image_names'] as List)
-              name.toString().trim().toLowerCase(),
+      final filesByName = <String, PlatformFile>{
+        for (final file in selectedExcelImages)
+          if (file.bytes != null) file.name.toLowerCase(): file,
       };
-      files = selectedExcelImages
-          .where((file) => expected.contains(file.name.toLowerCase()))
-          .toList();
+      files = <PlatformFile>[
+        for (final detail in excelDetails)
+          ...(() {
+            final serial = asInt(detail['_excel_serial']) ?? 0;
+            final originals = originalExcelPhotosBySerial[serial];
+            if (originals != null && originals.isNotEmpty) {
+              return originals;
+            }
+            final names = detail['_image_names'];
+            return <PlatformFile>[
+              if (names is List)
+                for (final name in names)
+                  if (filesByName[name.toString().toLowerCase()] != null)
+                    filesByName[name.toString().toLowerCase()]!,
+            ];
+          })(),
+      ];
     } else {
       files = List<PlatformFile>.from(selectedImages);
     }
@@ -531,6 +557,64 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     }
   }
 
+  Future<void> selectOriginalExcelPhotos(int excelSerial) async {
+    if (excelDetails.isEmpty || isLoading || readingOriginalPhotosForSerial != null) {
+      return;
+    }
+    setState(() => readingOriginalPhotosForSerial = excelSerial);
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+        allowMultiple: true,
+        withData: true, // Preserve the selected source image's original bytes.
+      );
+      if (result == null) return;
+      if (result.files.isEmpty || result.files.length > 5) {
+        showError('Choose 1 to 5 original JPG/PNG images for this Excel row.');
+        return;
+      }
+      final photos = <PlatformFile>[];
+      final dimensions = <String>[];
+      for (final file in result.files) {
+        if (file.bytes == null || file.bytes!.isEmpty) {
+          showError('Could not read ${file.name}; select the original photo again.');
+          return;
+        }
+        if (file.size > 12 * 1024 * 1024) {
+          showError('${file.name} exceeds 12 MB. Use an original under 12 MB.');
+          return;
+        }
+        final size = await readImageResolution(file.bytes);
+        if (size == null) {
+          showError('Unsupported image or corrupted image: ${file.name}');
+          return;
+        }
+        photos.add(file);
+        dimensions.add('${size.width} x ${size.height} px'
+            '${size.isLowResolution ? ' (LOW RESOLUTION)' : ''}');
+      }
+      if (!mounted) return;
+      setState(() {
+        originalExcelPhotosBySerial[excelSerial] = photos;
+        originalExcelPhotoDimensions[excelSerial] = dimensions;
+      });
+    } catch (error) {
+      if (mounted) showError('Original picture selection failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => readingOriginalPhotosForSerial = null);
+      }
+    }
+  }
+
+  void clearOriginalExcelPhotos(int excelSerial) {
+    setState(() {
+      originalExcelPhotosBySerial.remove(excelSerial);
+      originalExcelPhotoDimensions.remove(excelSerial);
+    });
+  }
+
   void removeManualImage(int index) {
     setState(() {
       selectedImages.removeAt(index);
@@ -698,7 +782,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         final missing = <String>[];
         for (final key in const <String>[
           'BUSINESS', 'ITEM CATEGORY', 'ITEM CODE', 'ORG',
-          'FOB', 'PICTURE', 'SIZE RANGE', 'MOQ',
+          'FOB', 'SIZE RANGE', 'MOQ',
         ]) {
           if (asText(row[key]).isEmpty) missing.add(key);
         }
@@ -896,6 +980,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         selectedExcelImages
           ..clear()
           ..addAll(embeddedFilesUsed);
+        originalExcelPhotosBySerial.clear();
+        originalExcelPhotoDimensions.clear();
         selectedExcelName = file.name;
         excelDetails = details;
         const hiddenLegacyHeaders = <String>{
@@ -982,6 +1068,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       excelTableHeaders = [];
       excelTableRows = [];
       selectedExcelImages.clear();
+      originalExcelPhotosBySerial.clear();
+      originalExcelPhotoDimensions.clear();
       selectedExcel3DModels.clear();
     });
 
@@ -1177,6 +1265,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       excelTableHeaders = <String>[];
       excelTableRows = <Map<String, dynamic>>[];
       selectedExcelImages.clear();
+      originalExcelPhotosBySerial.clear();
+      originalExcelPhotoDimensions.clear();
       selectedImages.clear();
       selectedExcel3DModels.clear();
       selected3DModel = null;
@@ -1270,6 +1360,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
        };
        final missingImages = <String>{};
        for (final row in excelDetails) {
+         final serial = asInt(row['_excel_serial']) ?? 0;
+         if (originalExcelPhotosBySerial[serial]?.isNotEmpty == true) {
+           continue;
+         }
          final names = row['_image_names'];
          if (names is List) {
            for (final name in names) {
@@ -1315,6 +1409,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
         return detail;
       }).toList();
+      for (var index = 0; index < details.length; index++) {
+        final images = details[index]['images'];
+        if (images is! List || images.isEmpty) {
+          showError('Excel serial ${index + 1}: picture required. '
+              'Select Original Photos for this product or embed a picture in Excel.');
+          return;
+        }
+      }
     } else {
        if (selectedImages.isEmpty) {
          showError('Picture is mandatory');
@@ -1687,6 +1789,106 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 ],
               ),
             ),
+
+            const SizedBox(height: 14),
+            Text(
+              'Original-resolution product photos (recommended)',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Keep EVERY Excel column unchanged. Select the original JPG/PNG '
+              'for each product below. Selected full-size image bytes override '
+              'small Excel embedded thumbnails. No filename or new Excel '
+              'column required; filenames are generated automatically on submit.',
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: excelDetails.length * 110.0 > 350.0
+                  ? 350.0
+                  : excelDetails.length * 110.0,
+              child: ListView.builder(
+                itemCount: excelDetails.length,
+                itemBuilder: (context, index) {
+                  final row = excelDetails[index];
+                  final serial = asInt(row['_excel_serial']) ?? index + 1;
+                  final photos = originalExcelPhotosBySerial[serial] ??
+                      const <PlatformFile>[];
+                  final sizes = originalExcelPhotoDimensions[serial] ??
+                      const <String>[];
+                  final busy = readingOriginalPhotosForSerial == serial;
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 5),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 5,
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '$serial. ${asText(row['item_code'])}  '
+                                  '${asText(row['description'])}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontWeight: FontWeight.w600),
+                                ),
+                                Text(
+                                  photos.isEmpty
+                                      ? 'Excel picture (if any) will be used'
+                                      : '${photos.length} original photo(s): '
+                                          '${sizes.join(', ')}',
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: photos.isEmpty
+                                        ? Colors.orange.shade800
+                                        : Colors.green.shade800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (photos.isNotEmpty)
+                            IconButton(
+                              onPressed: isLoading ||
+                                      readingOriginalPhotosForSerial != null
+                                  ? null
+                                  : () => clearOriginalExcelPhotos(serial),
+                              tooltip: 'Remove original image override',
+                              icon: const Icon(Icons.clear),
+                            ),
+                          const SizedBox(width: 3),
+                          OutlinedButton.icon(
+                            onPressed: isLoading ||
+                                    readingOriginalPhotosForSerial != null
+                                ? null
+                                : () => selectOriginalExcelPhotos(serial),
+                            icon: busy
+                                ? const SizedBox(
+                                    height: 15,
+                                    width: 15,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.photo_library_outlined),
+                            label: Text(photos.isEmpty ? 'Select' : 'Replace'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
 
             const SizedBox(height: 12),
 
