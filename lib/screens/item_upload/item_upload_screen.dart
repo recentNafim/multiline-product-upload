@@ -748,6 +748,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         if (asText(row['ITEM NAME']).isEmpty) {
           row['ITEM NAME'] = row['DESCRIPTION'];
         }
+        // ITEM CODE is optional: accept a blank cell or an entirely absent
+        // ITEM CODE column. Keep a normalized empty string for the preview
+        // and API payload rather than treating it as a validation failure.
+        row['ITEM CODE'] = asText(row['ITEM CODE']);
         if (asText(row['ORG']).isEmpty) {
           row['ORG'] = row['ORGANIZATION ID'];
         }
@@ -873,10 +877,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         firstRow['ITEM CATEGORY'],
       );
 
-      setControllerIfAvailable(
-        itemCodeController,
-        firstRow['ITEM CODE'],
-      );
+      // Do not preserve the previous item's code when the newly selected
+      // workbook deliberately leaves ITEM CODE blank.
+      itemCodeController.text = asText(firstRow['ITEM CODE']);
 
       setControllerIfAvailable(
         descriptionController,
@@ -1045,7 +1048,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         ),
       );
     } catch (e) {
-      if (mounted) showError(e.toString());
+      if (mounted) {
+        showError(e is FormatException ? e.message : e.toString());
+      }
     } finally {
       if (mounted) {
         setState(() => isReadingExcel = false);
