@@ -745,6 +745,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         if (asText(row['ITEM CATEGORY']).isEmpty) {
           row['ITEM CATEGORY'] = row['PRODUCT CATEGORY'];
         }
+        if (asText(row['ITEM NAME']).isEmpty) {
+          row['ITEM NAME'] = row['DESCRIPTION'];
+        }
         if (asText(row['ORG']).isEmpty) {
           row['ORG'] = row['ORGANIZATION ID'];
         }
@@ -781,13 +784,24 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         final row = rows[index];
         final missing = <String>[];
         for (final key in const <String>[
-          'BUSINESS', 'ITEM CATEGORY', 'ITEM CODE', 'ORG',
+          'BUSINESS', 'ITEM CATEGORY', 'ORG',
           'FOB', 'SIZE RANGE', 'MOQ',
         ]) {
           if (asText(row[key]).isEmpty) missing.add(key);
         }
         if (missing.isNotEmpty) {
           failures.add('Row ${index + 2}: missing ${missing.join(', ')}');
+        }
+        // Item code is optional. A readable item name is required only
+        // when the code is absent, so Oracle can identify the product.
+        if (asText(row['ITEM CODE']).isEmpty &&
+            asText(row['ITEM NAME']).isEmpty) {
+          failures.add('Row ${index + 2}: ITEM NAME is required when ITEM CODE is empty');
+        }
+        final weightText = asText(row['WEIGHT']);
+        if (weightText.isNotEmpty &&
+            (asDouble(row['WEIGHT']) == null || asDouble(row['WEIGHT'])! < 0)) {
+          failures.add('Row ${index + 2}: WEIGHT must be a non-negative number in grams (g)');
         }
         if (asText(row['ORG']).isNotEmpty && (asInt(row['ORG']) == null ||
             asDouble(row['ORG']) != asInt(row['ORG'])!.toDouble())) {
@@ -838,6 +852,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       setControllerIfAvailable(
         displayRoomNameController,
         firstRow['DISPLAY ROOM NAME'],
+      );
+
+      // The Excel format does not require STAFF ID as a column. It can
+      // be entered once in the master form, or auto-filled when supplied.
+      setControllerIfAvailable(
+        createdByController,
+        firstRow['STAFF ID'] ?? firstRow['CREATED BY'],
       );
 
       // Excel-এ Organization ID থাকলে fill করবে।
@@ -1024,24 +1045,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         ),
       );
     } catch (e) {
-      if (!mounted) {
-        return;
-      }
-
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.red,
-          content: Text(
-            e.toString(),
-          ),
-        ),
-      );
+      if (mounted) showError(e.toString());
     } finally {
       if (mounted) {
-        setState(() {
-          isReadingExcel = false;
-        });
+        setState(() => isReadingExcel = false);
       }
     }
   }
@@ -1299,6 +1306,64 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     return true;
   }
 
+  /// Shared pre-flight checks for Excel and manual form submissions.
+  /// An empty optional ITEM CODE must never block an upload.
+  List<String> _collectRequiredFieldErrors() {
+    final errors = <String>[];
+    final excelMode = excelDetails.isNotEmpty;
+    if (businessController.text.trim().isEmpty) {
+      errors.add('Business is required.');
+    }
+    final staffText = createdByController.text.trim();
+    final staffId = int.tryParse(staffText);
+    if (staffId == null || staffId <= 0) {
+      errors.add('Staff ID (Created By) is required and must be a positive number.');
+    }
+    final organizationText = organizationIdController.text.trim();
+    final organizationId = int.tryParse(organizationText);
+    if (excelMode && (organizationId == null || organizationId <= 0)) {
+      errors.add('Organization ID is required for Excel upload.');
+    } else if (organizationText.isNotEmpty &&
+        (organizationId == null || organizationId <= 0)) {
+      errors.add('Organization ID must be a positive number when provided.');
+    }
+    final assigneeText = assigneeController.text.trim();
+    if (assigneeText.isNotEmpty &&
+        (int.tryParse(assigneeText) == null || int.parse(assigneeText) <= 0)) {
+      errors.add('Assignee must be a positive numeric Staff ID when provided.');
+    }
+    if (!excelMode) {
+      if (productCategoryController.text.trim().isEmpty) {
+        errors.add('Item Category is required.');
+      }
+      if (itemCodeController.text.trim().isEmpty &&
+          descriptionController.text.trim().isEmpty) {
+        errors.add('Item Name / Description is required when Item Code is empty.');
+      }
+      final fob = double.tryParse(fobController.text.trim());
+      if (fob == null || fob < 0 || !fob.isFinite) {
+        errors.add('FOB is required and must be a non-negative number.');
+      }
+      final moq = double.tryParse(moqController.text.trim());
+      if (moq == null || moq <= 0 || !moq.isFinite) {
+        errors.add('MOQ is required and must be greater than zero.');
+      }
+      final sizeError = validateSizeRange(sizeRangeController.text);
+      if (sizeError != null) errors.add('Size Range: $sizeError');
+      if (selectedImages.isEmpty) {
+        errors.add('Picture is required. Select at least one image.');
+      }
+    }
+    final weightText = weightController.text.trim();
+    if (!excelMode && weightText.isNotEmpty) {
+      final weight = double.tryParse(weightText);
+      if (weight == null || weight < 0 || !weight.isFinite) {
+        errors.add('Weight must be a non-negative number in grams (g).');
+      }
+    }
+    return errors;
+  }
+
   // ============================================================
   // API SUBMIT
   // ============================================================
@@ -1306,7 +1371,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   Future<void> uploadItem() async {
     FocusScope.of(context).unfocus();
 
-    if (!_formKey.currentState!.validate()) {
+    // Always show a human-readable summary. Inline Form validators alone
+    // may be off screen for long Excel upload pages.
+    final errors = _collectRequiredFieldErrors();
+    final validForm = _formKey.currentState?.validate() ?? false;
+    if (!validForm || errors.isNotEmpty) {
+      showError(errors.isNotEmpty
+          ? 'Please fix these fields before submission:\n${errors.join('\n')}'
+          : 'Please correct the highlighted fields before submission.');
       return;
     }
 
@@ -1336,10 +1408,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       return;
     }
 
-    if (createdBy == null) {
-      showError(
-        'Valid Created By দিন',
-      );
+    if (createdBy == null || createdBy <= 0) {
+      showError('Staff ID / Created By must be a positive number.');
       return;
     }
 
@@ -1642,12 +1712,38 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     }
   }
 
+  // Visible even when the submit button is far below the invalid field.
   void showError(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(
-      SnackBar(
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
         backgroundColor: Colors.red,
-        content: Text(message),
+        duration: Duration(seconds: 5),
+        content: Text('Validation failed. See the error details dialog.'),
+      ),
+    );
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.error_outline, color: Colors.red),
+          SizedBox(width: 10),
+          Expanded(child: Text('Please fix these fields')),
+        ]),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560, maxHeight: 420),
+          child: SingleChildScrollView(
+            child: SelectableText(message),
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('OK'),
+          ),
+        ],
       ),
     );
   }
@@ -1802,7 +1898,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               'Keep EVERY Excel column unchanged. Select the original JPG/PNG '
               'for each product below. Selected full-size image bytes override '
               'small Excel embedded thumbnails. No filename or new Excel '
-              'column required; filenames are generated automatically on submit.',
+              'column required. ITEM CODE is optional; photo filenames are generated automatically on submit.',
             ),
             const SizedBox(height: 8),
             SizedBox(
@@ -2419,12 +2515,19 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     },
                   ),
                   second: buildTextField(
-                    label: 'Created By',
-                    hint: 'e.g. 506618',
+                    label: 'Staff ID (Created By)',
+                    hint: 'Required: e.g. 506618',
                     controller:
                     createdByController,
                     keyboardType:
                     TextInputType.number,
+                    validator: (value) {
+                      final staffId = int.tryParse((value ?? '').trim());
+                      if (staffId == null || staffId <= 0) {
+                        return 'Staff ID is required (positive numeric ID)';
+                      }
+                      return null;
+                    },
                   ),
                 ),
 
@@ -2508,9 +2611,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   children: [
                     Expanded(
                       child: buildTextField(
-                        label: 'Item Code',
-                        hint: 'e.g. 0100247925',
+                        label: 'Item Code (Optional)',
+                        hint: 'Optional — leave empty if product has no code',
                         controller: itemCodeController,
+                        required: false,
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -2525,13 +2629,22 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: buildTextField(
-                        label: 'Weight',
-                        hint: 'e.g. 0.2',
+                        label: 'Weight (g)',
+                        hint: 'In grams, e.g. 130',
                         controller: weightController,
-                    required: false,
+                        required: false,
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
+                        validator: (value) {
+                          final text = (value ?? '').trim();
+                          if (text.isEmpty) return null;
+                          final grams = double.tryParse(text);
+                          if (grams == null || grams < 0 || !grams.isFinite) {
+                            return 'Enter a non-negative weight in grams (g)';
+                          }
+                          return null;
+                        },
                       ),
                     ),
                   ],
@@ -2540,10 +2653,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 gap(),
 
                 buildTextField(
-                  label: 'Description',
-                  hint: 'e.g. LIDL SEMI FINISHED UPPER WHITE',
+                  label: 'Description / Item Name',
+                  hint: 'Required if Item Code is empty',
                   controller: descriptionController,
                     required: false,
+                  validator: (value) {
+                    if (itemCodeController.text.trim().isEmpty &&
+                        (value ?? '').trim().isEmpty) {
+                      return 'Item Name is required when Item Code is empty';
+                    }
+                    return null;
+                  },
                   maxLines: 2,
                 ),
 

@@ -37,7 +37,7 @@ String autoImageFileName({
   required Map<String, dynamic> image,
   required DateTime uploadTime,
 }) {
-  final code = _safeImageNamePart(itemCode, fallback: 'ITEM_CODE');
+  final code = _safeImageNamePart(itemCode, fallback: 'NO_CODE');
   final name = _safeImageNamePart(itemName, fallback: 'ITEM_NAME');
   final date = '${uploadTime.year.toString().padLeft(4, '0')}'
       '${uploadTime.month.toString().padLeft(2, '0')}'
