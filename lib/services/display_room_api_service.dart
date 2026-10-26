@@ -20,7 +20,7 @@ class DisplayRoomApiService {
     Uri.parse(ApiConstants.updateItem),
     headers: const {'Content-Type': 'application/json', 'Accept': 'application/json'},
     body: jsonEncode(body),
-  ).timeout(const Duration(seconds: 60));
+  ).timeout(const Duration(seconds: 180));
 
   static Future<http.Response> getDeleteData() => http.get(
     Uri.parse(ApiConstants.deleteItem),
