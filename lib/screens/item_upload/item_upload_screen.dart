@@ -3,12 +3,14 @@ import 'dart:convert';
 import 'package:excel/excel.dart' as xls;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import '../../core/constants/api_constants.dart';
 import '../../services/display_room_api_service.dart';
 import '../../utils/excel_value_utils.dart';
 import '../../utils/excel_embedded_pictures.dart';
 import '../../utils/auto_image_file_name.dart';
+import '../../utils/image_resolution.dart';
 import '../../widgets/common_form_widgets.dart';
 import '../../widgets/excel_data_table_preview.dart';
 
@@ -23,12 +25,80 @@ class ItemUploadScreen extends StatefulWidget {
 class _ItemUploadScreenState extends State<ItemUploadScreen> {
   static const String apiUrl = ApiConstants.uploadItem;
 
+  // Fixed UI choices only. The API payload and Oracle column names stay unchanged:
+  // Category -> master.business, Sub Category -> master.sub_category.
+  // Detail 'Item Category' remains the existing editable product_category field.
+  static const List<String> _categoryOptions = <String>[
+    'Footwear',
+    'Bag & Luggage',
+    'Tent',
+    'Umbrella',
+    'Handicraft',
+  ];
+  static const List<String> _subCategoryOptions = <String>[
+    'Export', 'Domestic',
+  ];
+
+  String? _matchingFixedChoice(String text, List<String> choices) {
+    final value = text.trim().toLowerCase();
+    for (final choice in choices) {
+      if (choice.toLowerCase() == value) return choice;
+    }
+    return null;
+  }
+
+  Widget _buildFixedDropdown({
+    required String label,
+    required TextEditingController controller,
+    required List<String> choices,
+    bool isRequired = true,
+  }) {
+    final selected = _matchingFixedChoice(controller.text, choices);
+    return DropdownButtonFormField<String>(
+      // Excel import and form reset also update this controller.
+      key: ValueKey<String>('fixed-$label-${controller.text.trim()}'),
+      value: selected,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: 'Select $label',
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        suffixIcon: !isRequired && controller.text.trim().isNotEmpty
+            ? IconButton(
+                tooltip: 'Clear $label',
+                icon: const Icon(Icons.close, size: 18),
+                onPressed: isLoading ? null : () {
+                  setState(controller.clear);
+                },
+              )
+            : null,
+      ),
+      items: choices.map((value) => DropdownMenuItem<String>(
+        value: value,
+        child: Text(value, overflow: TextOverflow.ellipsis),
+      )).toList(),
+      validator: (value) => isRequired && value == null
+          ? '$label is required'
+          : null,
+      onChanged: isLoading ? null : (value) {
+        if (value != null) {
+          setState(() => controller.text = value);
+        }
+      },
+    );
+  }
+
+
   final _formKey = GlobalKey<FormState>();
 
   bool isLoading = false;
   bool isReadingExcel = false;
 
   String? selectedExcelName;
+
+  // Remains visible after the upload form is cleared.
+  String? _submissionNotice;
 
   /// Excel select করলে API payload-এর জন্য mapped detail এখানে থাকবে।
   List<Map<String, dynamic>> excelDetails = [];
@@ -48,6 +118,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   /// Excel mode-এ IMAGE column-এর filename-এর সাথে match করার জন্য
   /// একসাথে অনেক image file select করা যাবে। Backend limit প্রতি item-এ 5।
   final List<PlatformFile> selectedExcelImages = [];
+
+  // Original full-resolution files override embedded Excel thumbnails.
+  // Key is the automatically generated Excel SERIAL, not a filename.
+  // No extra Excel column or user-entered filename is needed.
+  final Map<int, List<PlatformFile>> originalExcelPhotosBySerial = {};
+  final Map<int, List<String>> originalExcelPhotoDimensions = {};
+  int? readingOriginalPhotosForSerial;
 
   bool isReadingImages = false;
   bool isReadingExcelImages = false;
@@ -126,6 +203,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   List<Map<String, dynamic>> _excelImagesPayloadForDetail(
       Map<String, dynamic> detail,
       ) {
+    final int serial = asInt(detail['_excel_serial']) ?? 0;
+    final originals = originalExcelPhotosBySerial[serial];
+    if (originals != null && originals.isNotEmpty) {
+      // EXACT original selected bytes. No resizing, thumbnail extraction,
+      // recompression, image conversion, or quality reduction.
+      return originals.map(platformFileToImageJson).toList();
+    }
     final rawNames = detail['_image_names'];
 
     final List<String> expectedNames = rawNames is List
@@ -151,6 +235,89 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         .take(5)
         .map(platformFileToImageJson)
         .toList();
+  }
+
+  /// Stops silent low-quality uploads. Existing Excel cells may contain
+  /// thumbnail JPEGs (e.g. 92x69) even though Excel draws them quite large.
+  /// Let the user explicitly continue only after seeing the real dimensions.
+  Future<bool> _confirmImageQualityBeforeUpload() async {
+    final bool excelMode = excelDetails.isNotEmpty;
+    final List<PlatformFile> files;
+    if (excelMode) {
+      final filesByName = <String, PlatformFile>{
+        for (final file in selectedExcelImages)
+          if (file.bytes != null) file.name.toLowerCase(): file,
+      };
+      files = <PlatformFile>[
+        for (final detail in excelDetails)
+          ...(() {
+            final serial = asInt(detail['_excel_serial']) ?? 0;
+            final originals = originalExcelPhotosBySerial[serial];
+            if (originals != null && originals.isNotEmpty) {
+              return originals;
+            }
+            final names = detail['_image_names'];
+            return <PlatformFile>[
+              if (names is List)
+                for (final name in names)
+                  if (filesByName[name.toString().toLowerCase()] != null)
+                    filesByName[name.toString().toLowerCase()]!,
+            ];
+          })(),
+      ];
+    } else {
+      files = List<PlatformFile>.from(selectedImages);
+    }
+
+    final issues = <String>[];
+    for (final file in files) {
+      final resolution = await readImageResolution(file.bytes);
+      if (resolution != null && resolution.isLowResolution) {
+        issues.add('${file.name}: ${resolution.width} x ${resolution.height}');
+      }
+    }
+    if (issues.isEmpty) return true;
+    if (!mounted) return false;
+
+    final decision = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 8),
+            Expanded(child: Text('Low-resolution pictures')),
+          ],
+        ),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: SingleChildScrollView(
+            child: Text(
+              'These pictures are too small for the Dashboard:\n\n'
+              '${issues.take(8).join('\n')}'
+              '${issues.length > 8 ? '\n...and ${issues.length - 8} more' : ''}'
+              '\n\nFor sharp product pictures, use the original JPG/PNG '
+              '(preferably 1200x900 pixels or better). '
+              'If they were pasted from a thumbnail, replace them in Excel '
+              'using Insert > Pictures > This Device.\n\n'
+              'You may still upload, but the resulting image will remain blurry.',
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel - replace pictures'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Upload anyway'),
+          ),
+        ],
+      ),
+    );
+    return decision == true;
   }
 
   // ============================================================
@@ -455,6 +622,64 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     }
   }
 
+  Future<void> selectOriginalExcelPhotos(int excelSerial) async {
+    if (excelDetails.isEmpty || isLoading || readingOriginalPhotosForSerial != null) {
+      return;
+    }
+    setState(() => readingOriginalPhotosForSerial = excelSerial);
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+        allowMultiple: true,
+        withData: true, // Preserve the selected source image's original bytes.
+      );
+      if (result == null) return;
+      if (result.files.isEmpty || result.files.length > 5) {
+        showError('Choose 1 to 5 original JPG/PNG images for this Excel row.');
+        return;
+      }
+      final photos = <PlatformFile>[];
+      final dimensions = <String>[];
+      for (final file in result.files) {
+        if (file.bytes == null || file.bytes!.isEmpty) {
+          showError('Could not read ${file.name}; select the original photo again.');
+          return;
+        }
+        if (file.size > 12 * 1024 * 1024) {
+          showError('${file.name} exceeds 12 MB. Use an original under 12 MB.');
+          return;
+        }
+        final size = await readImageResolution(file.bytes);
+        if (size == null) {
+          showError('Unsupported image or corrupted image: ${file.name}');
+          return;
+        }
+        photos.add(file);
+        dimensions.add('${size.width} x ${size.height} px'
+            '${size.isLowResolution ? ' (LOW RESOLUTION)' : ''}');
+      }
+      if (!mounted) return;
+      setState(() {
+        originalExcelPhotosBySerial[excelSerial] = photos;
+        originalExcelPhotoDimensions[excelSerial] = dimensions;
+      });
+    } catch (error) {
+      if (mounted) showError('Original picture selection failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => readingOriginalPhotosForSerial = null);
+      }
+    }
+  }
+
+  void clearOriginalExcelPhotos(int excelSerial) {
+    setState(() {
+      originalExcelPhotosBySerial.remove(excelSerial);
+      originalExcelPhotoDimensions.remove(excelSerial);
+    });
+  }
+
   void removeManualImage(int index) {
     setState(() {
       selectedImages.removeAt(index);
@@ -585,6 +810,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         if (asText(row['ITEM CATEGORY']).isEmpty) {
           row['ITEM CATEGORY'] = row['PRODUCT CATEGORY'];
         }
+        if (asText(row['ITEM NAME']).isEmpty) {
+          row['ITEM NAME'] = row['DESCRIPTION'];
+        }
+        // ITEM CODE is optional: accept a blank cell or an entirely absent
+        // ITEM CODE column. Keep a normalized empty string for the preview
+        // and API payload rather than treating it as a validation failure.
+        row['ITEM CODE'] = asText(row['ITEM CODE']);
         if (asText(row['ORG']).isEmpty) {
           row['ORG'] = row['ORGANIZATION ID'];
         }
@@ -621,13 +853,24 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         final row = rows[index];
         final missing = <String>[];
         for (final key in const <String>[
-          'BUSINESS', 'ITEM CATEGORY', 'ITEM CODE', 'ORG',
-          'FOB', 'PICTURE', 'SIZE RANGE', 'MOQ',
+          'BUSINESS', 'ITEM CATEGORY', 'ORG',
+          'FOB', 'SIZE RANGE', 'MOQ',
         ]) {
           if (asText(row[key]).isEmpty) missing.add(key);
         }
         if (missing.isNotEmpty) {
           failures.add('Row ${index + 2}: missing ${missing.join(', ')}');
+        }
+        // Item code is optional. A readable item name is required only
+        // when the code is absent, so Oracle can identify the product.
+        if (asText(row['ITEM CODE']).isEmpty &&
+            asText(row['ITEM NAME']).isEmpty) {
+          failures.add('Row ${index + 2}: ITEM NAME is required when ITEM CODE is empty');
+        }
+        final weightText = asText(row['WEIGHT']);
+        if (weightText.isNotEmpty &&
+            (asDouble(row['WEIGHT']) == null || asDouble(row['WEIGHT'])! < 0)) {
+          failures.add('Row ${index + 2}: WEIGHT must be a non-negative number in grams (g)');
         }
         if (asText(row['ORG']).isNotEmpty && (asInt(row['ORG']) == null ||
             asDouble(row['ORG']) != asInt(row['ORG'])!.toDouble())) {
@@ -674,10 +917,24 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         subCategoryController,
         firstRow['SUB CATEGORY'],
       );
+      // Canonicalize Excel spelling when it matches a fixed UI choice.
+      businessController.text = _matchingFixedChoice(
+        businessController.text, _categoryOptions,
+      ) ?? businessController.text;
+      subCategoryController.text = _matchingFixedChoice(
+        subCategoryController.text, _subCategoryOptions,
+      ) ?? subCategoryController.text;
 
       setControllerIfAvailable(
         displayRoomNameController,
         firstRow['DISPLAY ROOM NAME'],
+      );
+
+      // The Excel format does not require STAFF ID as a column. It can
+      // be entered once in the master form, or auto-filled when supplied.
+      setControllerIfAvailable(
+        createdByController,
+        firstRow['STAFF ID'] ?? firstRow['CREATED BY'],
       );
 
       // Excel-এ Organization ID থাকলে fill করবে।
@@ -692,10 +949,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         firstRow['ITEM CATEGORY'],
       );
 
-      setControllerIfAvailable(
-        itemCodeController,
-        firstRow['ITEM CODE'],
-      );
+      // Do not preserve the previous item's code when the newly selected
+      // workbook deliberately leaves ITEM CODE blank.
+      itemCodeController.text = asText(firstRow['ITEM CODE']);
 
       setControllerIfAvailable(
         descriptionController,
@@ -820,6 +1076,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         selectedExcelImages
           ..clear()
           ..addAll(embeddedFilesUsed);
+        originalExcelPhotosBySerial.clear();
+        originalExcelPhotoDimensions.clear();
         selectedExcelName = file.name;
         excelDetails = details;
         const hiddenLegacyHeaders = <String>{
@@ -862,24 +1120,12 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         ),
       );
     } catch (e) {
-      if (!mounted) {
-        return;
+      if (mounted) {
+        showError(e is FormatException ? e.message : e.toString());
       }
-
-      ScaffoldMessenger.of(context)
-          .showSnackBar(
-        SnackBar(
-          backgroundColor: Colors.red,
-          content: Text(
-            e.toString(),
-          ),
-        ),
-      );
     } finally {
       if (mounted) {
-        setState(() {
-          isReadingExcel = false;
-        });
+        setState(() => isReadingExcel = false);
       }
     }
   }
@@ -906,6 +1152,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       excelTableHeaders = [];
       excelTableRows = [];
       selectedExcelImages.clear();
+      originalExcelPhotosBySerial.clear();
+      originalExcelPhotoDimensions.clear();
       selectedExcel3DModels.clear();
     });
 
@@ -1065,6 +1313,138 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     return copy;
   }
 
+  /// Clear all workbook, image and form state ONLY after a confirmed success.
+  /// Keep every field unchanged if the request fails so the user can retry.
+  void _clearEntryAfterSuccess({required String notice}) {
+    final controllers = <TextEditingController>[
+      businessController,
+      subCategoryController,
+      organizationIdController,
+      displayRoomNameController,
+      createdByController,
+      statusController,
+      assigneeController,
+      productCategoryController,
+      itemCodeController,
+      descriptionController,
+      uomController,
+      subInventoryCodeController,
+      cbmController,
+      fobController,
+      materialSpecificationController,
+      weightController,
+      sizeRangeController,
+      moqController,
+    ];
+    // Reset field errors first: TextFormField.reset() can restore its initial
+    // controller value, so controllers must be cleared AFTER FormState.reset().
+    _formKey.currentState?.reset();
+    for (final controller in controllers) {
+      controller.clear();
+    }
+    statusController.text = 'ACTIVE';
+    setState(() {
+      selectedExcelName = null;
+      excelDetails = <Map<String, dynamic>>[];
+      excelTableHeaders = <String>[];
+      excelTableRows = <Map<String, dynamic>>[];
+      selectedExcelImages.clear();
+      originalExcelPhotosBySerial.clear();
+      originalExcelPhotoDimensions.clear();
+      selectedImages.clear();
+      selectedExcel3DModels.clear();
+      selected3DModel = null;
+      _submissionNotice = notice;
+    });
+  }
+
+  bool _isConfirmedApiSuccess(http.Response response, dynamic decoded) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return false;
+    }
+    if (decoded is! Map) return true;
+    final rawStatus = decoded['status_code'] ?? decoded['STATUS_CODE'];
+    if (rawStatus != null &&
+        !{'200', '201', '202', '204', 'S', 'SUCCESS'}
+            .contains(rawStatus.toString().trim().toUpperCase())) {
+      return false;
+    }
+    final returnStatus = decoded['return_status'] ?? decoded['RETURN_STATUS'];
+    if (returnStatus != null &&
+        !{'S', 'SUCCESS', '200', '201'}
+            .contains(returnStatus.toString().trim().toUpperCase())) {
+      return false;
+    }
+    final explicitSuccess = decoded['success'];
+    if (explicitSuccess == false ||
+        explicitSuccess?.toString().toLowerCase() == 'false') {
+      return false;
+    }
+    return true;
+  }
+
+  /// Shared pre-flight checks for Excel and manual form submissions.
+  /// An empty optional ITEM CODE must never block an upload.
+  List<String> _collectRequiredFieldErrors() {
+    final errors = <String>[];
+    final excelMode = excelDetails.isNotEmpty;
+    if (_matchingFixedChoice(businessController.text, _categoryOptions) == null) {
+      errors.add('Select Category from the dropdown.');
+    }
+    if (subCategoryController.text.trim().isNotEmpty &&
+        _matchingFixedChoice(subCategoryController.text, _subCategoryOptions) == null) {
+      errors.add('Select Sub Category from the dropdown.');
+    }
+    final staffText = createdByController.text.trim();
+    final staffId = int.tryParse(staffText);
+    if (staffId == null || staffId <= 0) {
+      errors.add('Staff ID (Created By) is required and must be a positive number.');
+    }
+    final organizationText = organizationIdController.text.trim();
+    final organizationId = int.tryParse(organizationText);
+    if (excelMode && (organizationId == null || organizationId <= 0)) {
+      errors.add('Organization ID is required for Excel upload.');
+    } else if (organizationText.isNotEmpty &&
+        (organizationId == null || organizationId <= 0)) {
+      errors.add('Organization ID must be a positive number when provided.');
+    }
+    final assigneeText = assigneeController.text.trim();
+    if (assigneeText.isNotEmpty &&
+        (int.tryParse(assigneeText) == null || int.parse(assigneeText) <= 0)) {
+      errors.add('Assignee must be a positive numeric Staff ID when provided.');
+    }
+    if (!excelMode) {
+      if (productCategoryController.text.trim().isEmpty) {
+        errors.add('Item Category is required.');
+      }
+      if (itemCodeController.text.trim().isEmpty &&
+          descriptionController.text.trim().isEmpty) {
+        errors.add('Item Name / Description is required when Item Code is empty.');
+      }
+      final fob = double.tryParse(fobController.text.trim());
+      if (fob == null || fob < 0 || !fob.isFinite) {
+        errors.add('FOB is required and must be a non-negative number.');
+      }
+      final moq = double.tryParse(moqController.text.trim());
+      if (moq == null || moq <= 0 || !moq.isFinite) {
+        errors.add('MOQ is required and must be greater than zero.');
+      }
+      final sizeError = validateSizeRange(sizeRangeController.text);
+      if (sizeError != null) errors.add('Size Range: $sizeError');
+      if (selectedImages.isEmpty) {
+        errors.add('Picture is required. Select at least one image.');
+      }
+    }
+    final weightText = weightController.text.trim();
+    if (!excelMode && weightText.isNotEmpty) {
+      final weight = double.tryParse(weightText);
+      if (weight == null || weight < 0 || !weight.isFinite) {
+        errors.add('Weight must be a non-negative number in grams (g).');
+      }
+    }
+    return errors;
+  }
+
   // ============================================================
   // API SUBMIT
   // ============================================================
@@ -1072,7 +1452,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   Future<void> uploadItem() async {
     FocusScope.of(context).unfocus();
 
-    if (!_formKey.currentState!.validate()) {
+    // Always show a human-readable summary. Inline Form validators alone
+    // may be off screen for long Excel upload pages.
+    final errors = _collectRequiredFieldErrors();
+    final validForm = _formKey.currentState?.validate() ?? false;
+    if (!validForm || errors.isNotEmpty) {
+      showError(errors.isNotEmpty
+          ? 'Please fix these fields before submission:\n${errors.join('\n')}'
+          : 'Please correct the highlighted fields before submission.');
       return;
     }
 
@@ -1102,10 +1489,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       return;
     }
 
-    if (createdBy == null) {
-      showError(
-        'Valid Created By দিন',
-      );
+    if (createdBy == null || createdBy <= 0) {
+      showError('Staff ID / Created By must be a positive number.');
       return;
     }
 
@@ -1126,6 +1511,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
        };
        final missingImages = <String>{};
        for (final row in excelDetails) {
+         final serial = asInt(row['_excel_serial']) ?? 0;
+         if (originalExcelPhotosBySerial[serial]?.isNotEmpty == true) {
+           continue;
+         }
          final names = row['_image_names'];
          if (names is List) {
            for (final name in names) {
@@ -1171,6 +1560,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
         return detail;
       }).toList();
+      for (var index = 0; index < details.length; index++) {
+        final images = details[index]['images'];
+        if (images is! List || images.isEmpty) {
+          showError('Excel serial ${index + 1}: picture required. '
+              'Select Original Photos for this product or embed a picture in Excel.');
+          return;
+        }
+      }
     } else {
        if (selectedImages.isEmpty) {
          showError('Picture is mandatory');
@@ -1282,6 +1679,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     );
     debugPrint('==========================================');
 
+    // Validate original pixel dimensions before the HTTP request.
+    // This never compresses/resizes the image or changes auto-generated names.
+    if (!await _confirmImageQualityBeforeUpload()) return;
+    if (!mounted) return;
+
     setState(() {
       isLoading = true;
     });
@@ -1307,42 +1709,50 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         json = null;
       }
 
-      final apiStatus =
-      json is Map
-          ? json['status_code']
-          : null;
-
-      final message =
-      json is Map
-          ? json['message']
-          ?.toString() ??
-          'Request completed'
+      final String message = json is Map
+          ? (json['message'] ?? json['MESSAGE'] ?? '').toString()
           : response.body;
-
-      final success =
-          response.statusCode >= 200 &&
-              response.statusCode < 300 &&
-              (
-                  apiStatus == null ||
-                      apiStatus == 200 ||
-                      apiStatus.toString() ==
-                          '200'
-              );
+      final bool success = _isConfirmedApiSuccess(response, json);
 
       if (!mounted) {
         return;
       }
 
       if (success) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(
-          SnackBar(
-            backgroundColor: Colors.green,
-            content: Text(
-              excelDetails.isNotEmpty
-                  ? '$message\n${excelDetails.length} items uploaded.'
-                  : message,
+        final bool wasExcelUpload = excelDetails.isNotEmpty;
+        final int uploadedCount = normalizedDetails.length;
+        final notice = wasExcelUpload
+            ? 'Excel Uploaded Successfully ($uploadedCount items)'
+            : 'Submitted Successfully';
+
+        _clearEntryAfterSuccess(notice: notice);
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.hideCurrentSnackBar();
+        messenger.showSnackBar(SnackBar(
+          backgroundColor: const Color(0xFF15803D),
+          duration: const Duration(seconds: 7),
+          content: Text(notice),
+        ));
+        // Acknowledgement dialog stays on screen until explicitly closed.
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Color(0xFF15803D)),
+                SizedBox(width: 10),
+                Expanded(child: Text('Submitted Successfully')),
+              ],
             ),
+            content: Text(wasExcelUpload
+                ? '$uploadedCount Excel items uploaded successfully.\nThe entry page is now cleared.'
+                : 'Product uploaded successfully.\nThe entry page is now cleared.'),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('OK'),
+              ),
+            ],
           ),
         );
       } else {
@@ -1383,12 +1793,38 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     }
   }
 
+  // Visible even when the submit button is far below the invalid field.
   void showError(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(
-      SnackBar(
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      const SnackBar(
         backgroundColor: Colors.red,
-        content: Text(message),
+        duration: Duration(seconds: 5),
+        content: Text('Validation failed. See the error details dialog.'),
+      ),
+    );
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.error_outline, color: Colors.red),
+          SizedBox(width: 10),
+          Expanded(child: Text('Please fix these fields')),
+        ]),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560, maxHeight: 420),
+          child: SingleChildScrollView(
+            child: SelectableText(message),
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('OK'),
+          ),
+        ],
       ),
     );
   }
@@ -1530,6 +1966,106 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 ],
               ),
             ),
+
+            const SizedBox(height: 14),
+            Text(
+              'Original-resolution product photos (recommended)',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Keep EVERY Excel column unchanged. Select the original JPG/PNG '
+              'for each product below. Selected full-size image bytes override '
+              'small Excel embedded thumbnails. No filename or new Excel '
+              'column required. ITEM CODE is optional; photo filenames are generated automatically on submit.',
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: excelDetails.length * 110.0 > 350.0
+                  ? 350.0
+                  : excelDetails.length * 110.0,
+              child: ListView.builder(
+                itemCount: excelDetails.length,
+                itemBuilder: (context, index) {
+                  final row = excelDetails[index];
+                  final serial = asInt(row['_excel_serial']) ?? index + 1;
+                  final photos = originalExcelPhotosBySerial[serial] ??
+                      const <PlatformFile>[];
+                  final sizes = originalExcelPhotoDimensions[serial] ??
+                      const <String>[];
+                  final busy = readingOriginalPhotosForSerial == serial;
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 5),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 5,
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '$serial. ${asText(row['item_code'])}  '
+                                  '${asText(row['description'])}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontWeight: FontWeight.w600),
+                                ),
+                                Text(
+                                  photos.isEmpty
+                                      ? 'Excel picture (if any) will be used'
+                                      : '${photos.length} original photo(s): '
+                                          '${sizes.join(', ')}',
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: photos.isEmpty
+                                        ? Colors.orange.shade800
+                                        : Colors.green.shade800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (photos.isNotEmpty)
+                            IconButton(
+                              onPressed: isLoading ||
+                                      readingOriginalPhotosForSerial != null
+                                  ? null
+                                  : () => clearOriginalExcelPhotos(serial),
+                              tooltip: 'Remove original image override',
+                              icon: const Icon(Icons.clear),
+                            ),
+                          const SizedBox(width: 3),
+                          OutlinedButton.icon(
+                            onPressed: isLoading ||
+                                    readingOriginalPhotosForSerial != null
+                                ? null
+                                : () => selectOriginalExcelPhotos(serial),
+                            icon: busy
+                                ? const SizedBox(
+                                    height: 15,
+                                    width: 15,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.photo_library_outlined),
+                            label: Text(photos.isEmpty ? 'Select' : 'Replace'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 12),
 
             const SizedBox(height: 12),
 
@@ -1945,6 +2481,28 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               crossAxisAlignment:
               CrossAxisAlignment.stretch,
               children: [
+                if (_submissionNotice != null) ...[
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFECFDF5),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFF86EFAC)),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.check_circle, color: Color(0xFF15803D)),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text(_submissionNotice!,
+                          style: const TextStyle(fontWeight: FontWeight.w700))),
+                      IconButton(
+                        tooltip: 'Dismiss',
+                        onPressed: () => setState(() => _submissionNotice = null),
+                        icon: const Icon(Icons.close, size: 18),
+                      ),
+                    ]),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 // ==================================================
                 // EXCEL = OPTIONAL ONLY
                 // ==================================================
@@ -1971,17 +2529,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 ),
 
                 twoFields(
-                  first: buildTextField(
-                    label: 'Business',
-                    hint: 'e.g. Footwear',
+                  first: _buildFixedDropdown(
+                    label: 'Category',
                     controller: businessController,
+                    choices: _categoryOptions,
                   ),
                   second: twoFields(
-                    first: buildTextField(
+                    first: _buildFixedDropdown(
                       label: 'Sub Category',
-                      hint: 'e.g. Export',
                       controller: subCategoryController,
-                    required: false,
+                      choices: _subCategoryOptions,
+                      isRequired: false,
                     ),
                     second: DropdownButtonFormField<String>(
                       value: statusController.text.isEmpty
@@ -2038,12 +2596,19 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     },
                   ),
                   second: buildTextField(
-                    label: 'Created By',
-                    hint: 'e.g. 506618',
+                    label: 'Staff ID (Created By)',
+                    hint: 'Required: e.g. 506618',
                     controller:
                     createdByController,
                     keyboardType:
                     TextInputType.number,
+                    validator: (value) {
+                      final staffId = int.tryParse((value ?? '').trim());
+                      if (staffId == null || staffId <= 0) {
+                        return 'Staff ID is required (positive numeric ID)';
+                      }
+                      return null;
+                    },
                   ),
                 ),
 
@@ -2127,9 +2692,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   children: [
                     Expanded(
                       child: buildTextField(
-                        label: 'Item Code',
-                        hint: 'e.g. 0100247925',
+                        label: 'Item Code (Optional)',
+                        hint: 'Optional — leave empty if product has no code',
                         controller: itemCodeController,
+                        required: false,
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -2144,13 +2710,22 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: buildTextField(
-                        label: 'Weight',
-                        hint: 'e.g. 0.2',
+                        label: 'Weight (g)',
+                        hint: 'In grams, e.g. 130',
                         controller: weightController,
-                    required: false,
+                        required: false,
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
+                        validator: (value) {
+                          final text = (value ?? '').trim();
+                          if (text.isEmpty) return null;
+                          final grams = double.tryParse(text);
+                          if (grams == null || grams < 0 || !grams.isFinite) {
+                            return 'Enter a non-negative weight in grams (g)';
+                          }
+                          return null;
+                        },
                       ),
                     ),
                   ],
@@ -2159,10 +2734,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 gap(),
 
                 buildTextField(
-                  label: 'Description',
-                  hint: 'e.g. LIDL SEMI FINISHED UPPER WHITE',
+                  label: 'Description / Item Name',
+                  hint: 'Required if Item Code is empty',
                   controller: descriptionController,
                     required: false,
+                  validator: (value) {
+                    if (itemCodeController.text.trim().isEmpty &&
+                        (value ?? '').trim().isEmpty) {
+                      return 'Item Name is required when Item Code is empty';
+                    }
+                    return null;
+                  },
                   maxLines: 2,
                 ),
 
