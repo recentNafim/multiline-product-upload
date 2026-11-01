@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import '../../core/constants/api_constants.dart';
 import '../../services/display_room_api_service.dart';
 import '../../utils/excel_value_utils.dart';
+import '../../utils/excel_template_download.dart' as template_download;
 import '../../utils/excel_embedded_pictures.dart';
 import '../../utils/auto_image_file_name.dart';
 import '../../utils/image_resolution.dart';
@@ -24,71 +25,6 @@ class ItemUploadScreen extends StatefulWidget {
 
 class _ItemUploadScreenState extends State<ItemUploadScreen> {
   static const String apiUrl = ApiConstants.uploadItem;
-
-  // Fixed UI choices only. The API payload and Oracle column names stay unchanged:
-  // Category -> master.business, Sub Category -> master.sub_category.
-  // Detail 'Item Category' remains the existing editable product_category field.
-  static const List<String> _categoryOptions = <String>[
-    'Footwear',
-    'Bag & Luggage',
-    'Tent',
-    'Umbrella',
-    'Handicraft',
-  ];
-  static const List<String> _subCategoryOptions = <String>[
-    'Export', 'Domestic',
-  ];
-
-  String? _matchingFixedChoice(String text, List<String> choices) {
-    final value = text.trim().toLowerCase();
-    for (final choice in choices) {
-      if (choice.toLowerCase() == value) return choice;
-    }
-    return null;
-  }
-
-  Widget _buildFixedDropdown({
-    required String label,
-    required TextEditingController controller,
-    required List<String> choices,
-    bool isRequired = true,
-  }) {
-    final selected = _matchingFixedChoice(controller.text, choices);
-    return DropdownButtonFormField<String>(
-      // Excel import and form reset also update this controller.
-      key: ValueKey<String>('fixed-$label-${controller.text.trim()}'),
-      value: selected,
-      isExpanded: true,
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: 'Select $label',
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        suffixIcon: !isRequired && controller.text.trim().isNotEmpty
-            ? IconButton(
-                tooltip: 'Clear $label',
-                icon: const Icon(Icons.close, size: 18),
-                onPressed: isLoading ? null : () {
-                  setState(controller.clear);
-                },
-              )
-            : null,
-      ),
-      items: choices.map((value) => DropdownMenuItem<String>(
-        value: value,
-        child: Text(value, overflow: TextOverflow.ellipsis),
-      )).toList(),
-      validator: (value) => isRequired && value == null
-          ? '$label is required'
-          : null,
-      onChanged: isLoading ? null : (value) {
-        if (value != null) {
-          setState(() => controller.text = value);
-        }
-      },
-    );
-  }
-
 
   final _formKey = GlobalKey<FormState>();
 
@@ -159,6 +95,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   // Current API/UI fields only
   // ============================================================
 
+  final buyerController = TextEditingController();
   final productCategoryController = TextEditingController();
   final itemCodeController = TextEditingController();
   final descriptionController = TextEditingController();
@@ -693,6 +630,33 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   }
 
   // ============================================================
+  // DOWNLOAD CURRENT EXCEL TEMPLATE (header must remain row 1)
+  // ============================================================
+
+  void downloadExcelTemplate() {
+    try {
+      final workbook = xls.Excel.createExcel();
+      final sheet = workbook['Sheet1'];
+      const headers = <String>[
+        'BUSINESS', 'SUB CATEGORY', 'DISPLAY ROOM NAME', 'BUYER',
+        'ITEM CATEGORY', 'ITEM CODE', 'ITEM NAME', 'ORG', 'FOB',
+        'SIZE RANGE', 'MOQ', 'PICTURE', 'WEIGHT', 'CBM', 'UOM',
+        'SUB INVENTORY CODE', 'MATERIAL SPECIFICATION', '3D MODEL',
+      ];
+      sheet.appendRow(headers.map((text) => xls.TextCellValue(text)).toList());
+      final bytes = workbook.encode();
+      if (bytes == null || bytes.isEmpty) {
+        throw StateError('Cannot create template');
+      }
+      template_download.saveExcelTemplate(
+        bytes, 'display_room_buyer_template.xlsx',
+      );
+    } catch (e) {
+      showError('Excel template download failed: $e');
+    }
+  }
+
+  // ============================================================
   // SELECT EXCEL
   // ============================================================
 
@@ -823,6 +787,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         if (asText(row['PICTURE']).isEmpty) {
           row['PICTURE'] = row['IMAGE'];
         }
+        // Older Excel files may use an abbreviated room header.
+        if (asText(row['DISPLAY ROOM NAME']).isEmpty) {
+          row['DISPLAY ROOM NAME'] =
+              asText(row['DISPLAY ROOM']).isNotEmpty
+                  ? row['DISPLAY ROOM']
+                  : row['ROOM NAME'];
+        }
         // The user may paste a real JPEG/PNG object directly on the cell.
         // When no filename is supplied, import its bytes automatically.
         final inlinePictures = embeddedPictures[rowIndex] ?? <PlatformFile>[];
@@ -849,6 +820,22 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       final failures = <String>[];
       final firstBusiness = asText(rows.first['BUSINESS']).toLowerCase();
       final firstOrg = asInt(rows.first['ORG']);
+      // DISPLAY ROOM NAME is master-level, so a workbook can supply it on
+      // the first row or repeat it on subsequent rows. Blank rows inherit it.
+      final roomNames = rows
+          .map((row) => asText(row['DISPLAY ROOM NAME']))
+          .where((name) => name.isNotEmpty)
+          .toSet();
+      if (roomNames.length > 1) {
+        failures.add('Different DISPLAY ROOM NAME values found in one Excel file. '
+            'Use one Display Room Name for the same master upload.');
+      }
+      final excelRoomName = roomNames.isEmpty ? '' : roomNames.first;
+      if (excelRoomName.isNotEmpty) {
+        for (final row in rows) {
+          row['DISPLAY ROOM NAME'] = excelRoomName;
+        }
+      }
       for (int index = 0; index < rows.length; index++) {
         final row = rows[index];
         final missing = <String>[];
@@ -917,17 +904,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         subCategoryController,
         firstRow['SUB CATEGORY'],
       );
-      // Canonicalize Excel spelling when it matches a fixed UI choice.
-      businessController.text = _matchingFixedChoice(
-        businessController.text, _categoryOptions,
-      ) ?? businessController.text;
-      subCategoryController.text = _matchingFixedChoice(
-        subCategoryController.text, _subCategoryOptions,
-      ) ?? subCategoryController.text;
+      setControllerIfAvailable(buyerController, firstRow['BUYER']);
 
       setControllerIfAvailable(
         displayRoomNameController,
-        firstRow['DISPLAY ROOM NAME'],
+        excelRoomName,
       );
 
       // The Excel format does not require STAFF ID as a column. It can
@@ -1016,6 +997,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           asText(
             row['ITEM CATEGORY'],
           ),
+          "buyer": asText(row['BUYER']),
 
           // Internal helper. API পাঠানোর আগে remove করা হবে।
           "_image_names":
@@ -1096,12 +1078,16 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           'MIME TYPE',
         };
 
-        excelTableHeaders = <String>['SERIAL', ...headers.where((h) => h != 'SERIAL')]
-             .where(
-              (header) =>
-          header.isNotEmpty &&
-              !hiddenLegacyHeaders.contains(header),
-        )
+        // Keep master identifiers visible first (even in legacy workbooks
+        // where DISPLAY ROOM NAME was the final Excel column).
+        excelTableHeaders = <String>[
+          'SERIAL', 'BUSINESS', 'SUB CATEGORY', 'DISPLAY ROOM NAME', 'BUYER',
+          ...headers.where((h) => !const <String>{
+            'SERIAL', 'BUSINESS', 'SUB CATEGORY', 'DISPLAY ROOM NAME', 'BUYER',
+          }.contains(h)),
+        ]
+            .where((header) => header.isNotEmpty &&
+                !hiddenLegacyHeaders.contains(header))
             .toList();
         excelTableRows = rows;
       });
@@ -1176,6 +1162,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     _platformFileTo3DModelJson(selected3DModel);
 
     return {
+      "buyer": buyerController.text.trim(),
       "product_category":
       productCategoryController.text.trim(),
 
@@ -1227,6 +1214,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       Map<String, dynamic> source,
       ) {
     final detail = Map<String, dynamic>.from(source);
+    detail['buyer'] = asText(detail['buyer']).trim();
 
     // IMPORTANT:
     // CBM is TEXT in the API contract. Force it to String even if
@@ -1324,6 +1312,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       createdByController,
       statusController,
       assigneeController,
+      buyerController,
       productCategoryController,
       itemCodeController,
       descriptionController,
@@ -1388,12 +1377,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   List<String> _collectRequiredFieldErrors() {
     final errors = <String>[];
     final excelMode = excelDetails.isNotEmpty;
-    if (_matchingFixedChoice(businessController.text, _categoryOptions) == null) {
-      errors.add('Select Category from the dropdown.');
-    }
-    if (subCategoryController.text.trim().isNotEmpty &&
-        _matchingFixedChoice(subCategoryController.text, _subCategoryOptions) == null) {
-      errors.add('Select Sub Category from the dropdown.');
+    if (businessController.text.trim().isEmpty) {
+      errors.add('Business is required.');
     }
     final staffText = createdByController.text.trim();
     final staffId = int.tryParse(staffText);
@@ -1918,6 +1903,12 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   : 'Select Excel File',
             ),
           ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: isLoading ? null : downloadExcelTemplate,
+            icon: const Icon(Icons.download_outlined),
+            label: const Text('Download Excel Template (with Buyer)'),
+          ),
 
           if (selectedExcelName != null) ...[
             const SizedBox(height: 10),
@@ -1976,8 +1967,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
             ),
             const SizedBox(height: 6),
             const Text(
-              'Keep EVERY Excel column unchanged. Select the original JPG/PNG '
-              'for each product below. Selected full-size image bytes override '
+              'Buyer and Display Room Name are separate columns in the latest Excel template. '
+              'Select the original JPG/PNG for each product below. '
+              'Selected full-size image bytes override '
               'small Excel embedded thumbnails. No filename or new Excel '
               'column required. ITEM CODE is optional; photo filenames are generated automatically on submit.',
             ),
@@ -2452,6 +2444,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         centerTitle: true,
         actions: [
           IconButton(
+            tooltip: 'Bulk Image Update (Excel)',
+            onPressed: () => Navigator.pushNamed(context, '/bulk-images'),
+            icon: const Icon(Icons.collections_outlined),
+          ),
+          IconButton(
             tooltip: 'View Items',
             onPressed: () {
               Navigator.pushNamed(context, '/items');
@@ -2504,6 +2501,36 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   const SizedBox(height: 16),
                 ],
                 // ==================================================
+                // IMAGE-ONLY BULK UPDATE (EXISTING ITEM CODES)
+                // Separate from the product creation/upload workflow.
+                // ==================================================
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(children: [
+                      const Icon(Icons.collections_outlined),
+                      const SizedBox(width: 12),
+                      const Expanded(child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Bulk Image Update by Item Code',
+                              style: TextStyle(fontWeight: FontWeight.bold)),
+                          Text('Upload an Excel with ITEM CODE and IMAGE to replace '
+                              'images on existing products only.'),
+                        ],
+                      )),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: isLoading ? null : () =>
+                            Navigator.pushNamed(context, '/bulk-images'),
+                        icon: const Icon(Icons.upload_file_outlined),
+                        label: const Text('Open'),
+                      ),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // ==================================================
                 // EXCEL = OPTIONAL ONLY
                 // ==================================================
 
@@ -2529,17 +2556,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 ),
 
                 twoFields(
-                  first: _buildFixedDropdown(
-                    label: 'Category',
+                  first: buildTextField(
+                    label: 'Business',
+                    hint: 'e.g. Footwear',
                     controller: businessController,
-                    choices: _categoryOptions,
                   ),
                   second: twoFields(
-                    first: _buildFixedDropdown(
+                    first: buildTextField(
                       label: 'Sub Category',
+                      hint: 'e.g. Export',
                       controller: subCategoryController,
-                      choices: _subCategoryOptions,
-                      isRequired: false,
+                    required: false,
                     ),
                     second: DropdownButtonFormField<String>(
                       value: statusController.text.isEmpty
@@ -2617,7 +2644,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                 twoFields(
                   first: buildTextField(
                     label: 'Display Room Name',
-                    hint: 'e.g. MLIL-R10-Ftwr-Display Room',
+                    hint: 'From Excel or enter manually, e.g. MLIL-R10-Ftwr-Display Room',
                     controller: displayRoomNameController,
                     required: false,
                   ),
@@ -2670,6 +2697,15 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                       ),
                     ),
                   ),
+
+                buildTextField(
+                  label: 'Buyer',
+                  hint: 'e.g. ABC Trading',
+                  controller: buyerController,
+                  required: false,
+                ),
+
+                gap(),
 
                 twoFields(
                   first: buildTextField(
@@ -2867,6 +2903,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     statusController.dispose();
     assigneeController.dispose();
 
+    buyerController.dispose();
     productCategoryController.dispose();
     itemCodeController.dispose();
     descriptionController.dispose();

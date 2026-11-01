@@ -18,16 +18,6 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
   bool isLoading = false;
   String? error;
   List<DisplayRoomItem> items = [];
-  // This report/list page uses the same fixed Category/Sub Category options
-  // as the entry page and the separate user dashboard.
-  static const List<String> _categoryOptions = <String>[
-    'Footwear', 'Bag & Luggage', 'Tent', 'Umbrella', 'Handicraft',
-  ];
-  static const List<String> _subCategoryOptions = <String>[
-    'Export', 'Domestic',
-  ];
-  String? _selectedCategory;
-  String? _selectedSubCategory;
 
   @override
   void initState() {
@@ -36,42 +26,21 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
     getItems();
   }
 
-  // Only comparisons are normalized; the Oracle BUSINESS and SUB_CATEGORY
-  // values are preserved. Historic data sometimes spells Footwear as Footware.
-  static String _normalizeFilterValue(String value) {
-    final normalized = value.trim().toLowerCase()
-        .replaceAll('&', 'and')
-        .replaceAll(RegExp(r'\s+'), ' ');
-    if (normalized == 'footware') return 'footwear';
-    return normalized;
-  }
-
-  static bool _matchesFilter(String actual, String? selected) {
-    return selected == null || selected.isEmpty ||
-        _normalizeFilterValue(actual) == _normalizeFilterValue(selected);
-  }
-
   Future<void> getItems() async {
     if (isLoading) return;
-    setState(() { isLoading = true; error = null; });
+    setState(() {isLoading = true; error = null;});
     try {
-      const pageSize = 100;
+      final response = await DisplayRoomApiService.getItems();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+      final decoded = jsonDecode(response.body);
+      final data = decoded is Map ? (decoded['data'] ?? decoded['items']) : decoded;
       final result = <DisplayRoomItem>[];
-      final seenMasters = <String>{};
-      var page = 1;
-      while (true) {
-        final response = await DisplayRoomApiService.getItems(page: page, limit: pageSize);
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw Exception('HTTP ${response.statusCode}: ${response.body}');
-        }
-        final decoded = jsonDecode(response.body);
-        final data = decoded is Map ? (decoded['data'] ?? decoded['items']) : decoded;
-        if (data is! List || data.isEmpty) break;
+      if (data is List) {
         for (final raw in data) {
           if (raw is! Map) continue;
           final master = Map<String, dynamic>.from(raw);
-          final masterKey = master['sl']?.toString();
-          if (masterKey != null && !seenMasters.add(masterKey)) continue;
           final details = master['details'];
           if (details is List && details.isNotEmpty) {
             for (final item in details) {
@@ -84,15 +53,6 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
             result.add(DisplayRoomItem.fromMasterDetail(master, master));
           }
         }
-        final totalPages = decoded is Map
-            ? int.tryParse(decoded['total_pages']?.toString() ?? '')
-            : null;
-        if (totalPages != null && totalPages >= 0) {
-          if (page >= totalPages) break;
-        } else if (data.length < pageSize) {
-          break;
-        }
-        page++;
       }
       if (!mounted) return;
       setState(() => items = result);
@@ -125,6 +85,8 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
     final moq = TextEditingController(text: item.quantity?.toString() ?? '');
     final fob = TextEditingController(text: item.fob?.toString() ?? '');
     final category = TextEditingController(text: item.productCategory);
+    final buyer = TextEditingController(text: item.buyer);
+    final roomName = TextEditingController(text: item.displayRoomName);
     final updatedBy = TextEditingController(text: (item.updatedBy ?? item.createdBy)?.toString() ?? '');
     bool busy = false;
     // Only explicitly deleted image IDs are sent to Oracle.
@@ -189,6 +151,8 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                 _field(code, 'Item Code'),
                 _field(description, 'Item Name / Description'),
                 _field(category, 'Item Category'),
+                _field(buyer, 'Buyer'),
+                _field(roomName, 'Display Room Name'),
                 _field(size, 'Size Range'),
                 _field(moq, 'MOQ', numeric: true),
                 _field(fob, 'FOB', numeric: true),
@@ -336,7 +300,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                     // Do not invent a value or block editing when it is missing.
                     if (item.displayRoomNo.trim().isNotEmpty)
                       'display_room_no': item.displayRoomNo,
-                    'display_room_name': item.displayRoomName,
+                    'display_room_name': roomName.text.trim(),
                     'updated_by': int.tryParse(updatedBy.text) ?? 0,
                     'status': item.status,
                     'assignee': item.assignee,
@@ -344,6 +308,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                       'sl': item.sl,
                       'source_sl': item.sourceSl,
                       'product_category': category.text.trim(),
+                      'buyer': buyer.text.trim(),
                       'print': item.printValue,
                       'item_qrcode': item.itemQrCode,
                       'item_code': code.text.trim(),
@@ -416,7 +381,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
       // Wait for the dialog exit animation before disposing controllers.
       await Future<void>.delayed(const Duration(milliseconds: 400));
       code.dispose(); description.dispose(); size.dispose(); moq.dispose();
-      fob.dispose(); category.dispose(); updatedBy.dispose();
+      fob.dispose(); category.dispose(); buyer.dispose(); roomName.dispose(); updatedBy.dispose();
     }
   }
 
@@ -494,18 +459,14 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
   @override
   Widget build(BuildContext context) {
     final query = searchController.text.trim().toLowerCase();
-    final filtered = items.where((p) {
-      final matchesSearch = query.isEmpty ||
-        [p.itemCode, p.description, p.business, p.productCategory,
-         p.subCategory, p.displayRoomName, p.sizeRange]
-          .any((text) => text.toLowerCase().contains(query));
-      // Match the existing master BUSINESS and SUB_CATEGORY response fields.
-      final matchesCategory = _matchesFilter(p.business, _selectedCategory);
-      final matchesSubCategory = _matchesFilter(p.subCategory, _selectedSubCategory);
-      return matchesSearch && matchesCategory && matchesSubCategory;
-    }).toList();
+    final filtered = items.where((p) => query.isEmpty ||
+      [p.itemCode, p.description, p.business, p.productCategory, p.buyer, p.displayRoomName,
+       p.sizeRange].any((text) => text.toLowerCase().contains(query))).toList();
     return Scaffold(
       appBar: AppBar(title: const Text('Display Room Items'), actions: [
+        IconButton(tooltip: 'Bulk Image Update (Excel)',
+          icon: const Icon(Icons.collections_outlined),
+          onPressed: () => Navigator.pushNamed(context, '/bulk-images')),
         IconButton(tooltip: 'Delete Items', icon: const Icon(Icons.delete_outline),
           onPressed: () => Navigator.pushNamed(context, '/delete')),
         IconButton(tooltip: 'Refresh', icon: const Icon(Icons.refresh),
@@ -515,66 +476,8 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
         Padding(padding: const EdgeInsets.all(16), child: TextField(
           controller: searchController,
           decoration: const InputDecoration(prefixIcon: Icon(Icons.search),
-            hintText: 'Search item code, category, size range...'),
+            hintText: 'Search item code, display room name, buyer, category...'),
         )),
-        // Fixed dropdowns on the Items/Report page, without database lookups.
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-          child: Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              SizedBox(
-                width: 245,
-                child: DropdownButtonFormField<String>(
-                  key: ValueKey<String>('report-category-${_selectedCategory ?? 'all'}'),
-                  value: _selectedCategory,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Category',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  hint: const Text('All Categories'),
-                  items: _categoryOptions.map((choice) => DropdownMenuItem<String>(
-                    value: choice,
-                    child: Text(choice, overflow: TextOverflow.ellipsis),
-                  )).toList(),
-                  onChanged: (value) => setState(() => _selectedCategory = value),
-                ),
-              ),
-              SizedBox(
-                width: 220,
-                child: DropdownButtonFormField<String>(
-                  key: ValueKey<String>('report-subcategory-${_selectedSubCategory ?? 'all'}'),
-                  value: _selectedSubCategory,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Sub Category',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  hint: const Text('All Sub Categories'),
-                  items: _subCategoryOptions.map((choice) => DropdownMenuItem<String>(
-                    value: choice,
-                    child: Text(choice, overflow: TextOverflow.ellipsis),
-                  )).toList(),
-                  onChanged: (value) => setState(() => _selectedSubCategory = value),
-                ),
-              ),
-              TextButton.icon(
-                icon: const Icon(Icons.filter_alt_off_outlined),
-                label: const Text('Clear Filters'),
-                onPressed: () => setState(() {
-                  _selectedCategory = null;
-                  _selectedSubCategory = null;
-                  searchController.clear();
-                }),
-              ),
-            ],
-          ),
-        ),
         if (isLoading) const LinearProgressIndicator(),
         if (error != null) Padding(padding: const EdgeInsets.all(12),
           child: Text(error!, style: const TextStyle(color: Colors.red))),
@@ -587,8 +490,11 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                 leading: const Icon(Icons.inventory_2_outlined),
                 title: Text(p.description.isEmpty ? p.itemCode : p.description),
                 subtitle: Text('${p.itemCode}  •  ${p.business}  •  ${p.productCategory}\n'
+                  'Display Room: ${p.displayRoomName.isEmpty ? '-' : p.displayRoomName}\n'
+                  'Buyer: ${p.buyer.isEmpty ? '-' : p.buyer}  •  '
                   'Size Range: ${p.sizeRange.isEmpty ? '-' : p.sizeRange}  •  '
-                  'MOQ: ${p.quantity ?? 0}  •  FOB: ${p.fob ?? 0}'),
+                  'MOQ: ${p.quantity ?? 0}  •  FOB: ${p.fob ?? 0}',
+                  maxLines: 3, overflow: TextOverflow.ellipsis),
                 isThreeLine: true,
                 trailing: IconButton(tooltip: 'Edit', icon: const Icon(Icons.edit_outlined),
                   onPressed: () => openEditSheet(p)),

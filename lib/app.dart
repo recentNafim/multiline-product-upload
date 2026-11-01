@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'screens/delete/display_room_delete_page.dart';
+import 'screens/bulk_image_update/bulk_image_update_page.dart';
 import 'screens/item_list/display_room_item_list_page.dart';
 import 'screens/item_upload/item_upload_screen.dart';
 
@@ -14,6 +15,7 @@ class MyApp extends StatelessWidget {
     routes: {
       '/items': (_) => const DisplayRoomItemListPage(),
       '/delete': (_) => const DisplayRoomDeletePage(),
+      '/bulk-images': (_) => const BulkImageUpdatePage(),
     },
   );
 }

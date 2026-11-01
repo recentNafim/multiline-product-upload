@@ -31,6 +31,7 @@ class DisplayRoomItem {
   final int? updatedBy;
   final String sourceSl;
   final String productCategory;
+  final String buyer;
   final String printValue;
   final String itemQrCode;
   final String fileUrl;
@@ -55,7 +56,7 @@ class DisplayRoomItem {
     required this.business, required this.subCategory, required this.organizationId,
     required this.organizationCode, required this.displayRoomNo, required this.displayRoomName,
     required this.status, required this.assignee, required this.createdBy, required this.updatedBy,
-    required this.sourceSl, required this.productCategory, required this.printValue,
+    required this.sourceSl, required this.productCategory, required this.buyer, required this.printValue,
     required this.itemQrCode, required this.fileUrl, required this.fileName,
     required this.mimeType, required this.itemCode, required this.description,
     required this.uom, required this.quantity, required this.unitPrice,
@@ -130,6 +131,8 @@ class DisplayRoomItem {
       status: s(master['status']), assignee: i(master['assignee']),
       createdBy: i(master['created_by']), updatedBy: i(master['updated_by']),
       sourceSl: s(detail['source_sl']), productCategory: s(detail['product_category']),
+      buyer: s(byNormalizedKey(detail, const {'buyer', 'buyername'}) ??
+          byNormalizedKey(master, const {'buyer', 'buyername'})),
       printValue: s(detail['print']), itemQrCode: s(detail['item_qrcode']),
       fileUrl: s(detail['file_url']), fileName: s(detail['file_name']),
       mimeType: s(detail['mime_type']), itemCode: s(detail['item_code']),

@@ -11,13 +11,21 @@ class DisplayRoomApiService {
     body: jsonEncode(body),
   ).timeout(const Duration(seconds: 120));
 
-  static Future<http.Response> getItems({int page = 1, int limit = 100}) => http.get(
+  // Server-side exact item-code lookup. GET limits page size to 100,
+  // and total_records is used to reject duplicate matches safely.
+  static Future<http.Response> getItemsByCode(String itemCode) => http.get(
     Uri.parse(ApiConstants.listItems).replace(queryParameters: {
-      'p_page': page.toString(),
-      'p_limit': limit.toString(),
+      'p_item_code': itemCode.trim(),
+      'p_page': '1',
+      'p_limit': '100',
     }),
     headers: const {'Accept': 'application/json'},
   ).timeout(const Duration(seconds: 60));
+
+  static Future<http.Response> getItems() => http.get(
+    Uri.parse(ApiConstants.listItems),
+    headers: const {'Accept': 'application/json'},
+  );
 
   static Future<http.Response> updateItem(Map<String, dynamic> body) => http.put(
     Uri.parse(ApiConstants.updateItem),
