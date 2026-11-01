@@ -1545,14 +1545,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
         return detail;
       }).toList();
-      for (var index = 0; index < details.length; index++) {
-        final images = details[index]['images'];
-        if (images is! List || images.isEmpty) {
-          showError('Excel serial ${index + 1}: picture required. '
-              'Select Original Photos for this product or embed a picture in Excel.');
-          return;
-        }
-      }
+      // Excel pictures are OPTIONAL. If no picture is embedded, referenced, or
+      // selected for a row, the POST payload sends `images: []`. The backend
+      // inserts that product without a primary image and without gallery rows.
+      // Rows that do include pictures still use the original Base64 bytes.
     } else {
        if (selectedImages.isEmpty) {
          showError('Picture is mandatory');
@@ -1960,7 +1956,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
             const SizedBox(height: 14),
             Text(
-              'Original-resolution product photos (recommended)',
+              'Original-resolution product photos (optional)',
               style: Theme.of(context).textTheme.titleSmall?.copyWith(
                 fontWeight: FontWeight.bold,
               ),
@@ -1968,10 +1964,11 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
             const SizedBox(height: 6),
             const Text(
               'Buyer and Display Room Name are separate columns in the latest Excel template. '
-              'Select the original JPG/PNG for each product below. '
-              'Selected full-size image bytes override '
-              'small Excel embedded thumbnails. No filename or new Excel '
-              'column required. ITEM CODE is optional; photo filenames are generated automatically on submit.',
+              'Product pictures are OPTIONAL for Excel upload. Leave the PICTURE cell blank '
+              'and skip image selection to upload an item without a photo. '
+              'If you include pictures, selected original JPG/PNG bytes override '
+              'small embedded thumbnails. You can add pictures later via Bulk Image Update. '
+              'ITEM CODE is optional; image filenames are generated on submit.',
             ),
             const SizedBox(height: 8),
             SizedBox(
@@ -2008,16 +2005,19 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                                   style: const TextStyle(fontWeight: FontWeight.w600),
                                 ),
                                 Text(
-                                  photos.isEmpty
-                                      ? 'Excel picture (if any) will be used'
-                                      : '${photos.length} original photo(s): '
-                                          '${sizes.join(', ')}',
+                                  photos.isNotEmpty
+                                      ? '${photos.length} original photo(s): '
+                                          '${sizes.join(', ')}'
+                                      : (row['_image_names'] is List &&
+                                              (row['_image_names'] as List).isNotEmpty)
+                                          ? 'Excel image attached / referenced'
+                                          : 'No image (allowed; add one later)',
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     fontSize: 11,
                                     color: photos.isEmpty
-                                        ? Colors.orange.shade800
+                                        ? Colors.grey.shade700
                                         : Colors.green.shade800,
                                   ),
                                 ),
@@ -2082,9 +2082,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
             const SizedBox(height: 8),
 
             Text(
-              'PICTURE cell-এ ছবি paste করুন; filename লিখতে হবে না। '
-                  'Upload করার সময় Item Code + Item Name + Serial + Image Number + Date + Time অনুযায়ী filename তৈরি হবে। '
-                  'পুরোনো filename-based Excel-ও support করবে।',
+              'Excel-এ PICTURE ফাঁকা রাখতে পারবেন। ছবি থাকলে cell-এ paste করুন '
+                  'অথবা filename লিখে সেই original file select করুন। ছবি দেওয়া থাকলেই কেবল '
+                  'Item Code + Item Name + Serial + Image Number + Date + Time অনুযায়ী filename তৈরি হবে।',
               style: TextStyle(
                 fontSize: 12,
                 color: Colors.grey.shade600,
