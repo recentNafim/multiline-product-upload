@@ -47,6 +47,10 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
   bool _busy = false;
   bool _checked = false;
   int _processed = 0;
+  // Keep only lightweight success totals; uploaded image bytes are removed
+  // from selection as soon as the API confirms a successful replacement.
+  int _completedProducts = 0;
+  int _completedImages = 0;
   String? _pageError;
 
   @override
@@ -213,6 +217,8 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
       setState(() {
         _filesByName.addAll(incoming);
         _pageError = null;
+        _completedProducts = 0;
+        _completedImages = 0;
         _rebuildRows();
       });
       _toast('${incoming.length} image(s) selected. Please review Item Code matches.');
@@ -238,6 +244,8 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
       _rows = [];
       _checked = false;
       _processed = 0;
+      _completedProducts = 0;
+      _completedImages = 0;
       _pageError = null;
     });
   }
@@ -459,14 +467,26 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
               'The server returned unexpected gallery counts. Check the updated product before retrying.',
             );
           }
-          row.status = 'Updated';
-          row.message = '${images.length} image(s) saved successfully';
+          // Only a confirmed IMAGE_ONLY success with exact image counters
+          // clears the client-side selection. The uploaded files are already
+          // stored by the server, so no preview/file bytes need to be retained.
+          if (mounted) {
+            setState(() {
+              for (final file in row.photos) {
+                _filesByName.remove(_key(_baseFilename(file.name)));
+              }
+              _rows.remove(row);
+              _completedProducts++;
+              _completedImages += images.length;
+              _processed++;
+            });
+          }
         } catch (error) {
           row.status = 'Failed';
           row.message = '$error';
+          _processed++;
+          if (mounted) setState(() {});
         }
-        _processed++;
-        if (mounted) setState(() {});
       }
     } catch (error) {
       if (mounted) {
@@ -542,7 +562,6 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final matched = _rows.where((r) => r.isMatched).length;
-    final updated = _rows.where((r) => r.status == 'Updated').length;
     final failed = _rows.where((r) => r.status == 'Failed').length;
     final conflicts = _rows.where((r) => r.status == 'Conflict' || r.status == 'Not found').length;
 
@@ -629,12 +648,30 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
           padding: const EdgeInsets.symmetric(vertical: 8),
           child: Text(_pageError!, style: const TextStyle(color: Colors.red)),
         ),
+        if (_completedProducts > 0) ...[
+          const SizedBox(height: 14),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(children: [
+                const Icon(Icons.check_circle_outline, color: Colors.green),
+                const SizedBox(width: 10),
+                Expanded(child: Text(
+                  '$_completedProducts product(s) updated successfully '
+                  '($_completedImages image(s)). Uploaded pictures were cleared '
+                  'from this page.',
+                )),
+              ]),
+            ),
+          ),
+        ],
         if (_rows.isNotEmpty) ...[
           const SizedBox(height: 18),
-          Text('Image preview & results', style: theme.textTheme.titleMedium),
+          Text('Image preview & remaining items', style: theme.textTheme.titleMedium),
           const SizedBox(height: 4),
-          Text('${_rows.length} Item Code(s) • $updated updated • $failed failed • '
-              '$conflicts missing/conflicting • $_processed processed'),
+          Text('${_rows.length} remaining Item Code(s) • '
+              '$failed failed • $conflicts missing/conflicting • '
+              '$_processed processed this run'),
           const SizedBox(height: 8),
           ..._rows.map((row) => Card(
             key: ValueKey(_key(row.itemCode)),
