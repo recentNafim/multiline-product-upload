@@ -464,7 +464,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
        p.sizeRange].any((text) => text.toLowerCase().contains(query))).toList();
     return Scaffold(
       appBar: AppBar(title: const Text('Display Room Items'), actions: [
-        IconButton(tooltip: 'Bulk Image Update (Excel)',
+        IconButton(tooltip: 'Bulk Image Update (By Filename)',
           icon: const Icon(Icons.collections_outlined),
           onPressed: () => Navigator.pushNamed(context, '/bulk-images')),
         IconButton(tooltip: 'Delete Items', icon: const Icon(Icons.delete_outline),

@@ -635,6 +635,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
   void downloadExcelTemplate() {
     try {
+      // The upload parser reads the FIRST worksheet's FIRST row as headers.
+      // Keep Sheet1 first and the column spellings in sync with selectExcelFile().
       final workbook = xls.Excel.createExcel();
       final sheet = workbook['Sheet1'];
       const headers = <String>[
@@ -643,16 +645,49 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         'SIZE RANGE', 'MOQ', 'PICTURE', 'WEIGHT', 'CBM', 'UOM',
         'SUB INVENTORY CODE', 'MATERIAL SPECIFICATION', '3D MODEL',
       ];
-      sheet.appendRow(headers.map((text) => xls.TextCellValue(text)).toList());
+      sheet.appendRow(headers.map((value) => xls.TextCellValue(value)).toList());
+
+      // Guidance lives on the SECOND sheet, so it can never be mistaken for
+      // product data by the existing first-sheet Excel import flow.
+      final guide = workbook['Instructions'];
+      const guideRows = <List<String>>[
+        ['DISPLAY ROOM - EXCEL UPLOAD FORMAT'],
+        ['Fill your products on Sheet1. Do not rename or reorder the first header row.'],
+        ['COLUMN', 'REQUIRED?', 'INSTRUCTIONS'],
+        ['BUSINESS', 'Yes', 'Use the same Business for every row in one file.'],
+        ['SUB CATEGORY', 'Optional', 'For example Export or Domestic.'],
+        ['DISPLAY ROOM NAME', 'Optional', 'One value for the entire file; set in the first row or repeat.'],
+        ['BUYER', 'Optional', 'Buyer name is saved separately for each product.'],
+        ['ITEM CATEGORY', 'Yes', 'Product category.'],
+        ['ITEM CODE', 'Conditional', 'Enter item code as TEXT to preserve leading zeroes. Required only when ITEM NAME is empty.'],
+        ['ITEM NAME', 'Conditional', 'Required when ITEM CODE is blank.'],
+        ['ORG', 'Yes', 'Numeric Oracle organization ID; must be the same across all rows.'],
+        ['FOB', 'Yes', 'Number greater than or equal to zero.'],
+        ['SIZE RANGE', 'Yes', 'For example 36-42.'],
+        ['MOQ', 'Yes', 'Number greater than zero.'],
+        ['PICTURE', 'Optional', 'Leave blank to upload without images. Add or replace images later using Bulk Image Update.'],
+        ['WEIGHT', 'Optional', 'Weight in grams, zero or positive.'],
+        ['CBM', 'Optional', 'Free-text CBM value.'],
+        ['UOM', 'Optional', 'Product unit of measure.'],
+        ['SUB INVENTORY CODE', 'Optional', 'Oracle subinventory code.'],
+        ['MATERIAL SPECIFICATION', 'Optional', 'Product material information.'],
+        ['3D MODEL', 'Optional', 'GLB file name; choose matching files separately.'],
+        ['IMPORTANT', '', 'Staff ID/Created By is entered on the Entry Page, not in this sheet.'],
+        ['IMPORTANT', '', 'For Bulk Image Update, upload renamed images directly. No Excel is required.'],
+      ];
+      for (final row in guideRows) {
+        guide.appendRow(row.map((value) => xls.TextCellValue(value)).toList());
+      }
+
       final bytes = workbook.encode();
       if (bytes == null || bytes.isEmpty) {
-        throw StateError('Cannot create template');
+        throw StateError('Cannot create Excel format');
       }
       template_download.saveExcelTemplate(
-        bytes, 'display_room_buyer_template.xlsx',
+        bytes, 'display_room_item_upload_format.xlsx',
       );
     } catch (e) {
-      showError('Excel template download failed: $e');
+      showError('Excel format download failed: $e');
     }
   }
 
@@ -1875,35 +1910,29 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
           const SizedBox(height: 12),
 
+          // Always visible, even before the user selects an Excel file.
+          FilledButton.icon(
+            onPressed: isLoading ? null : downloadExcelTemplate,
+            icon: const Icon(Icons.download_for_offline_outlined),
+            label: const Text('Download Excel Format (.xlsx)'),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Buyer ও Display Room Name-সহ সঠিক Excel format download করুন। '
+            'PICTURE field optional; Sheet1-এর প্রথম row-এর header বদলাবেন না।',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
+          const SizedBox(height: 12),
           OutlinedButton.icon(
-            onPressed:
-            isReadingExcel ||
-                isLoading
-                ? null
-                : selectExcelFile,
+            onPressed: isReadingExcel || isLoading ? null : selectExcelFile,
             icon: isReadingExcel
                 ? const SizedBox(
-              width: 18,
-              height: 18,
-              child:
-              CircularProgressIndicator(
-                strokeWidth: 2,
-              ),
-            )
-                : const Icon(
-              Icons.upload_file,
-            ),
-            label: Text(
-              isReadingExcel
-                  ? 'Reading Excel...'
-                  : 'Select Excel File',
-            ),
-          ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: isLoading ? null : downloadExcelTemplate,
-            icon: const Icon(Icons.download_outlined),
-            label: const Text('Download Excel Template (with Buyer)'),
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.upload_file),
+            label: Text(isReadingExcel ? 'Reading Excel...' : 'Select Excel File'),
           ),
 
           if (selectedExcelName != null) ...[
@@ -2444,7 +2473,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         centerTitle: true,
         actions: [
           IconButton(
-            tooltip: 'Bulk Image Update (Excel)',
+            tooltip: 'Bulk Image Update (By Filename)',
             onPressed: () => Navigator.pushNamed(context, '/bulk-images'),
             icon: const Icon(Icons.collections_outlined),
           ),
@@ -2513,10 +2542,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                       const Expanded(child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('Bulk Image Update by Item Code',
+                          Text('Bulk Image Update by Image Filename',
                               style: TextStyle(fontWeight: FontWeight.bold)),
-                          Text('Upload an Excel with ITEM CODE and IMAGE to replace '
-                              'images on existing products only.'),
+                          Text('Rename each image file as its ITEM CODE, select multiple images, '
+                              'and replace the pictures of matching products. No Excel required.'),
                         ],
                       )),
                       const SizedBox(width: 8),
