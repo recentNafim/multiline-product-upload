@@ -66,32 +66,34 @@ Map<String, dynamic> platformFileToImageJson(PlatformFile file) {
   };
 }
 
-/// Standard client size-range format: 36-42 (decimal sizes like 6.5-10 also work).
-/// Spaces and typographic dashes are normalized to the ASCII hyphen used by
-/// the Oracle API. Do not convert sizes into dates or two separate fields.
+/// Footwear sizes stay as 36-42. Other products (tents, umbrellas, etc.)
+/// may describe their dimensions in the same text column.
 String normalizeSizeRange(dynamic value) {
-  return asText(value)
-      .trim()
-      .replaceAll(RegExp(r'\s*[-–—]\s*'), '-');
+  return asText(value).trim().replaceAll(RegExp(r'\s*[-–—]\s*'), '-');
 }
 
-/// Return null when the size range is a valid number-number interval.
+/// Oracle accepts any non-empty textual SIZE_RANGE / dimensions string.
+/// Do not reject real inventory files based on footwear-specific grammar.
 String? validateSizeRange(dynamic value) {
-  final String range = normalizeSizeRange(value);
-  if (range.isEmpty) {
-    return 'Size Range is mandatory (e.g. 36-42)';
-  }
-
-  final match = RegExp(r'^([0-9]+(?:\.[0-9]+)?)-([0-9]+(?:\.[0-9]+)?)$')
-      .firstMatch(range);
-  if (match == null) {
-    return 'Use numeric Size Range like 36-42 (not S-XL)';
-  }
-
-  final double lower = double.parse(match.group(1)!);
-  final double upper = double.parse(match.group(2)!);
-  if (lower > upper) {
-    return 'Lower size must not be greater than upper size';
-  }
+  final range = normalizeSizeRange(value);
+  if (range.isEmpty) return 'Size Range / Dimensions is mandatory';
+  if (range.length > 100) return 'Size Range / Dimensions must be within 100 characters';
   return null;
+}
+
+/// Convert explicitly labelled Excel weights to grams, as required by the
+/// API. Bare numeric cells have always meant grams and continue to do so.
+/// Returns null for an invalid weight, which the caller should reject.
+double? parseExcelWeightGrams(dynamic value) {
+  final raw = asText(value).replaceAll(',', '').trim();
+  if (raw.isEmpty) return null;
+  final match = RegExp(
+    r'^([0-9]+(?:\.[0-9]+)?)\s*(KG|KGS|KILOGRAM|KILOGRAMS|G|GRAM|GRAMS)?$',
+    caseSensitive: false,
+  ).firstMatch(raw);
+  if (match == null) return null;
+  final weight = double.tryParse(match.group(1)!);
+  if (weight == null || !weight.isFinite || weight < 0) return null;
+  final unit = (match.group(2) ?? 'G').toUpperCase();
+  return unit.startsWith('K') ? weight * 1000 : weight;
 }

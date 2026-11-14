@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import '../../core/constants/api_constants.dart';
 import '../../services/display_room_api_service.dart';
 import '../../utils/excel_value_utils.dart';
+import '../../utils/excel_style_free_reader.dart';
 import '../../utils/excel_template_download.dart' as template_download;
 import '../../utils/excel_embedded_pictures.dart';
 import '../../utils/auto_image_file_name.dart';
@@ -663,10 +664,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         ['ITEM NAME', 'Conditional', 'Required when ITEM CODE is blank.'],
         ['ORG', 'Yes', 'Numeric Oracle organization ID; must be the same across all rows.'],
         ['FOB', 'Yes', 'Number greater than or equal to zero.'],
-        ['SIZE RANGE', 'Yes', 'For example 36-42.'],
+        ['SIZE RANGE', 'Yes', 'For example 36-42 or a dimension such as 210 X 180 X 115CM.'],
         ['MOQ', 'Yes', 'Number greater than zero.'],
         ['PICTURE', 'Optional', 'Leave blank to upload without images. Add or replace images later using Bulk Image Update.'],
-        ['WEIGHT', 'Optional', 'Weight in grams, zero or positive.'],
+        ['WEIGHT', 'Optional', 'Grams or an explicit KG value (e.g. 2.3 KG). Numbers without a unit mean grams.'],
         ['CBM', 'Optional', 'Free-text CBM value.'],
         ['UOM', 'Optional', 'Product unit of measure.'],
         ['SUB INVENTORY CODE', 'Optional', 'Oracle subinventory code.'],
@@ -720,22 +721,15 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         );
       }
 
-      final excel =
-      xls.Excel.decodeBytes(file.bytes!);
-
-      if (excel.tables.isEmpty) {
-        throw Exception(
-          'Excel file-এ কোনো sheet পাওয়া যায়নি',
-        );
-      }
-
-      final sheetName = excel.tables.keys.first;
-      final sheet = excel.tables[sheetName];
-
-      if (sheet == null || sheet.rows.isEmpty) {
-        throw Exception(
-          'Excel sheet empty',
-        );
+      // Read only worksheet cell values, without decoding xl/styles.xml.
+      // Avoids the excel package's custom numFmtId 43/44/164 exception
+      // entirely, even for customer-authored Excel sheets.
+      // Original Excel bytes are still used for embedded image extraction.
+      final sheet = readExcelSheetWithoutStyles(file.bytes!);
+      debugPrint('Excel style-independent import v2: '
+          '${sheet.name}, ${sheet.rows.length} rows');
+      if (sheet.rows.isEmpty) {
+        throw const FormatException('Excel sheet empty');
       }
 
       // ========================================================
@@ -747,13 +741,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       final List<String> headers = [];
 
       for (final cell in headerRow) {
-        headers.add(
-          normalizeHeader(
-            asText(
-              getExcelValue(cell),
-            ),
-          ),
-        );
+        headers.add(normalizeHeader(asText(cell)));
       }
 
       // Embedded Excel pictures have no cell value. Match drawing anchors to
@@ -798,9 +786,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           dynamic value;
 
           if (columnIndex < excelRow.length) {
-            value = getExcelValue(
-              excelRow[columnIndex],
-            );
+            value = excelRow[columnIndex];
           }
 
           row[header] = value;
@@ -838,6 +824,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           row['PICTURE'] = inlinePictures.map((f) => f.name).join(';');
           embeddedFilesUsed.addAll(inlinePictures);
         }
+        // Excel may specify WEIGHT as "2.3 KG" or "2300 g". The API
+        // always stores grams. Unlabelled numbers retain the existing
+        // grams interpretation; never guess their unit.
+        final excelWeight = asText(row['WEIGHT']);
+        if (excelWeight.isNotEmpty) {
+          final grams = parseExcelWeightGrams(excelWeight);
+          if (grams != null) row['WEIGHT'] = grams;
+        }
         // Ignore only fully blank rows, after considering embedded images.
         if (row.values.every((value) => asText(value).isEmpty)) {
           continue;
@@ -850,80 +844,22 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         throw Exception('Excel file-এ valid item পাওয়া যায়নি');
       }
 
-      // Validate the ENTIRE workbook before a single POST. The API accepts
-      // one master business/organization per request; reject mixed files.
-      final failures = <String>[];
-      final firstBusiness = asText(rows.first['BUSINESS']).toLowerCase();
-      final firstOrg = asInt(rows.first['ORG']);
-      // DISPLAY ROOM NAME is master-level, so a workbook can supply it on
-      // the first row or repeat it on subsequent rows. Blank rows inherit it.
+      // Import is deliberately permissive: real customer Excel files can
+      // contain variable sizes, blank optional fields or legacy formatting.
+      // Validate the Oracle-required fields at submission, not selection,
+      // so the user can always see and inspect the Excel preview.
       final roomNames = rows
           .map((row) => asText(row['DISPLAY ROOM NAME']))
           .where((name) => name.isNotEmpty)
           .toSet();
-      if (roomNames.length > 1) {
-        failures.add('Different DISPLAY ROOM NAME values found in one Excel file. '
-            'Use one Display Room Name for the same master upload.');
-      }
       final excelRoomName = roomNames.isEmpty ? '' : roomNames.first;
-      if (excelRoomName.isNotEmpty) {
+      if (excelRoomName.isNotEmpty && roomNames.length == 1) {
         for (final row in rows) {
-          row['DISPLAY ROOM NAME'] = excelRoomName;
+          if (asText(row['DISPLAY ROOM NAME']).isEmpty) {
+            row['DISPLAY ROOM NAME'] = excelRoomName;
+          }
         }
       }
-      for (int index = 0; index < rows.length; index++) {
-        final row = rows[index];
-        final missing = <String>[];
-        for (final key in const <String>[
-          'BUSINESS', 'ITEM CATEGORY', 'ORG',
-          'FOB', 'SIZE RANGE', 'MOQ',
-        ]) {
-          if (asText(row[key]).isEmpty) missing.add(key);
-        }
-        if (missing.isNotEmpty) {
-          failures.add('Row ${index + 2}: missing ${missing.join(', ')}');
-        }
-        // Item code is optional. A readable item name is required only
-        // when the code is absent, so Oracle can identify the product.
-        if (asText(row['ITEM CODE']).isEmpty &&
-            asText(row['ITEM NAME']).isEmpty) {
-          failures.add('Row ${index + 2}: ITEM NAME is required when ITEM CODE is empty');
-        }
-        final weightText = asText(row['WEIGHT']);
-        if (weightText.isNotEmpty &&
-            (asDouble(row['WEIGHT']) == null || asDouble(row['WEIGHT'])! < 0)) {
-          failures.add('Row ${index + 2}: WEIGHT must be a non-negative number in grams (g)');
-        }
-        if (asText(row['ORG']).isNotEmpty && (asInt(row['ORG']) == null ||
-            asDouble(row['ORG']) != asInt(row['ORG'])!.toDouble())) {
-          failures.add('Row ${index + 2}: ORG must be a numeric organization ID');
-        }
-        final fobText = asText(row['FOB']);
-        if (fobText.isNotEmpty &&
-            (asDouble(row['FOB']) == null || asDouble(row['FOB'])! < 0)) {
-          failures.add('Row ${index + 2}: FOB must be a non-negative number');
-        }
-        final moqText = asText(row['MOQ']);
-        if (moqText.isNotEmpty &&
-            (asDouble(row['MOQ']) == null || asDouble(row['MOQ'])! <= 0)) {
-          failures.add('Row ${index + 2}: MOQ must be greater than zero');
-        }
-         final sizeRangeIssue = validateSizeRange(row['SIZE RANGE']);
-         if (sizeRangeIssue != null) {
-           failures.add('Row ${index + 2}: $sizeRangeIssue');
-         }
-        if (asText(row['BUSINESS']).toLowerCase() != firstBusiness ||
-            asInt(row['ORG']) != firstOrg) {
-          failures.add('Row ${index + 2}: Business/ORG differs from the first row');
-        }
-        if (imageNamesFromExcelValue(row['PICTURE']).length > 5) {
-          failures.add('Row ${index + 2}: maximum 5 pictures per product');
-        }
-      }
-      if (failures.isNotEmpty) {
-        throw FormatException('Excel validation failed:\n${failures.take(15).join('\n')}');
-      }
-
       // ========================================================
       // FIRST ROW -> MASTER + MANUAL FIELD PREVIEW
       // ========================================================
@@ -1136,7 +1072,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         SnackBar(
           backgroundColor: Colors.green,
           content: Text(
-            '${details.length} Excel rows loaded',
+            '${details.length} Excel rows loaded (format-independent)',
           ),
         ),
       );
@@ -1524,6 +1460,55 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     final List<Map<String, dynamic>> details;
 
     if (excelDetails.isNotEmpty) {
+       // Preview is never blocked by nonstandard Excel formatting; but Oracle
+       // requires fields below before a POST. Show exact row errors instead
+       // of issuing a request that would fail or silently save wrong data.
+       final rowErrors = <String>[];
+       final expectedBusiness = businessController.text.trim().toLowerCase();
+       final expectedOrganization = organizationId;
+       for (var i = 0; i < excelTableRows.length; i++) {
+         final row = excelTableRows[i];
+         final rowNo = i + 2;
+         if (asText(row['ITEM CATEGORY']).isEmpty) {
+           rowErrors.add('Row $rowNo: ITEM CATEGORY missing');
+         }
+         if (asText(row['ITEM CODE']).isEmpty &&
+             asText(row['ITEM NAME']).isEmpty) {
+           rowErrors.add('Row $rowNo: ITEM NAME or ITEM CODE required');
+         }
+         final price = asDouble(row['FOB']);
+         if (price == null || !price.isFinite || price < 0) {
+           rowErrors.add('Row $rowNo: valid FOB required');
+         }
+         final moq = asDouble(row['MOQ']);
+         if (moq == null || !moq.isFinite || moq <= 0) {
+           rowErrors.add('Row $rowNo: MOQ greater than zero required');
+         }
+         if (validateSizeRange(row['SIZE RANGE']) != null) {
+           rowErrors.add('Row $rowNo: SIZE RANGE missing or too long');
+         }
+         final weight = asText(row['WEIGHT']);
+         if (weight.isNotEmpty &&
+             (asDouble(row['WEIGHT']) == null || asDouble(row['WEIGHT'])! < 0)) {
+           rowErrors.add('Row $rowNo: WEIGHT must be valid grams');
+         }
+         if (asText(row['BUSINESS']).isNotEmpty &&
+             asText(row['BUSINESS']).toLowerCase() != expectedBusiness) {
+           rowErrors.add('Row $rowNo: BUSINESS differs from upload master');
+         }
+         if (asText(row['ORG']).isNotEmpty &&
+             asInt(row['ORG']) != expectedOrganization) {
+           rowErrors.add('Row $rowNo: ORG differs from upload master');
+         }
+         if (imageNamesFromExcelValue(row['PICTURE']).length > 5) {
+           rowErrors.add('Row $rowNo: maximum 5 pictures per product');
+         }
+       }
+       if (rowErrors.isNotEmpty) {
+         showError('Excel imported, but these fields must be fixed to save:\n'
+             '${rowErrors.take(15).join('\n')}');
+         return;
+       }
        // Images must exist as bytes before upload, not merely as filenames.
        final filesByName = <String>{
          for (final file in selectedExcelImages)
