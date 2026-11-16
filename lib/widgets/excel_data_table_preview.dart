@@ -18,6 +18,10 @@ class ExcelDataTablePreview extends StatelessWidget {
       'PRINT ITEM', 'QR CODE', 'TRACK MARK', 'FACTORY',
       'LOCATOR ID', 'UNIT PRICE',
     }.contains(h.trim().toUpperCase())).toList();
+    final sizeFilled = rows.where((row) =>
+      (row['SIZE RANGE'] ?? '').toString().trim().isNotEmpty).length;
+    final weightFilled = rows.where((row) =>
+      (row['WEIGHT'] ?? '').toString().trim().isNotEmpty).length;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -26,6 +30,13 @@ class ExcelDataTablePreview extends StatelessWidget {
           children: [
             Text('Excel Preview (${rows.length} items)',
                 style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text(
+              'Optional fields detected — Size Range: $sizeFilled/${rows.length}, '
+              'Weight: $weightFilled/${rows.length}. '
+              'Blank values will remain blank in the database.',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            ),
             const SizedBox(height: 8),
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,

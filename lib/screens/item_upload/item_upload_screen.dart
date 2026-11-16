@@ -739,9 +739,22 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       final headerRow = sheet.rows.first;
 
       final List<String> headers = [];
+      final List<String> originalHeaders = [];
 
       for (final cell in headerRow) {
-        headers.add(normalizeHeader(asText(cell)));
+        final rawHeader = normalizeHeader(asText(cell));
+        originalHeaders.add(rawHeader);
+        headers.add(canonicalUploadHeader(rawHeader));
+      }
+      debugPrint('Excel original headers: $originalHeaders');
+      debugPrint('Excel mapped headers: $headers');
+      if (!headers.contains('SIZE RANGE')) {
+        debugPrint('WARNING: No recognizable size/dimension column; '
+            'optional SIZE_RANGE will be empty.');
+      }
+      if (!headers.contains('WEIGHT')) {
+        debugPrint('WARNING: No recognizable weight column; '
+            'optional WEIGHT_TEXT will be empty.');
       }
 
       // Embedded Excel pictures have no cell value. Match drawing anchors to
@@ -789,7 +802,18 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
             value = excelRow[columnIndex];
           }
 
-          row[header] = value;
+          // Preserve explicitly declared KG/G units in the column header;
+          // otherwise keep the customer's original cell text unchanged.
+          if (header == 'WEIGHT') {
+            value = excelWeightWithHeadingUnit(
+              value, originalHeaders[columnIndex],
+            );
+          }
+          // Where multiple headers map to the same canonical field, an
+          // empty second column must not erase a previously nonempty value.
+          if (asText(value).isNotEmpty || asText(row[header]).isEmpty) {
+            row[header] = value;
+          }
         }
 
         if (asText(row['ITEM CATEGORY']).isEmpty) {
@@ -930,15 +954,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         firstRow['MATERIAL SPECIFICATION'],
       );
 
-      setControllerIfAvailable(
-        weightController,
-        firstRow['WEIGHT'],
-      );
-
-       setControllerIfAvailable(
-         sizeRangeController,
-         normalizeSizeRange(firstRow['SIZE RANGE']),
-       );
+      // Preview must reflect this workbook, not stale values from a
+      // previous upload. These two fields remain entirely optional.
+      weightController.text = asText(firstRow['WEIGHT']);
+      sizeRangeController.text = normalizeSizeRange(firstRow['SIZE RANGE']);
       setControllerIfAvailable(moqController, firstRow['MOQ']);
 
       // ========================================================
@@ -1655,6 +1674,14 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     debugPrint('DETAIL COUNT => ${details.length}');
     debugPrint('IMAGE COUNT => $totalImageCount');
     debugPrint('3D MODEL COUNT => $total3DModelCount');
+    // Lightweight, non-Base64 diagnosis: verify values for each item before
+    // the POST. Empty fields stay optional, but are never hidden silently.
+    for (final detail in normalizedDetails) {
+      debugPrint('POST OPTIONAL FIELDS | item_code=${detail['item_code']} | '
+          'size_range=${jsonEncode(detail['size_range'])} | '
+          'weight_text=${jsonEncode(detail['weight_text'])} | '
+          'weight=${jsonEncode(detail['weight'])}');
+    }
     debugPrint(
       'PAYLOAD => ${jsonEncode(_debugSafeBody(body))}',
     );

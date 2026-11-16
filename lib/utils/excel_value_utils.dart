@@ -5,6 +5,63 @@ import 'package:file_picker/file_picker.dart';
 String normalizeHeader(String value) => value.trim().toUpperCase()
     .replaceAll('_', ' ').replaceAll(RegExp(r'\s+'), ' ');
 
+/// Map common customer Excel headings onto the existing upload contract.
+/// This changes only how column headings are interpreted; cell values stay
+/// intact and absent optional fields remain absent.
+String canonicalUploadHeader(String raw) {
+  final header = normalizeHeader(raw);
+  final compact = header.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  if (const <String>{
+    'SIZE', 'SIZES', 'SIZERANGE', 'SIZERANGES', 'DIMENSION', 'DIMENSIONS',
+    'PRODUCTSIZE', 'PRODUCTDIMENSION', 'PRODUCTDIMENSIONS',
+    'SIZEANDDIMENSION', 'SIZEANDDIMENSIONS', 'MEASUREMENT', 'MEASUREMENTS',
+  }.contains(compact) ||
+      compact.startsWith('SIZERANGE') ||
+      compact.startsWith('PRODUCTSIZE') ||
+      compact.startsWith('DIMENSION') ||
+      compact.startsWith('PRODUCTDIMENSION') ||
+      const <String>{'SIZECM', 'SIZEMM', 'SIZEINCH', 'SIZEINCHES'}
+          .contains(compact)) {
+    return 'SIZE RANGE';
+  }
+  if (const <String>{
+    'WEIGHT', 'WEIGHTTEXT', 'WT', 'NETWEIGHT', 'GROSSWEIGHT',
+    'PRODUCTWEIGHT', 'ITEMWEIGHT', 'WEIGHTG', 'WEIGHTGM', 'WEIGHTGRAM',
+    'WEIGHTGRAMS', 'WEIGHTKG', 'WEIGHTKGS', 'WEIGHTKILOGRAM',
+    'WEIGHTKILOGRAMS', 'NETWEIGHTKG', 'GROSSWEIGHTKG',
+    'PRODUCTWEIGHTKG', 'ITEMWEIGHTKG',
+  }.contains(compact) ||
+      compact.startsWith('NETWEIGHT') ||
+      compact.startsWith('GROSSWEIGHT') ||
+      compact.startsWith('PRODUCTWEIGHT') ||
+      compact.startsWith('ITEMWEIGHT') ||
+      const <String>{'WEIGHTLB', 'WEIGHTLBS', 'WEIGHTPOUND', 'WEIGHTPOUNDS'}
+          .contains(compact)) {
+    return 'WEIGHT';
+  }
+  if (const <String>{'ITEMDESCRIPTION', 'PRODUCTNAME', 'PRODUCTDESCRIPTION'}
+      .contains(compact)) return 'ITEM NAME';
+  return header;
+}
+
+/// For explicit unit-bearing weight headings, retain the source unit.
+/// Example: WEIGHT (KG) with numeric 0.740 -> "0.740 kg".
+/// WEIGHT with no unit remains exactly as supplied (no assumed conversion).
+String excelWeightWithHeadingUnit(dynamic value, String rawHeading) {
+  final entered = asText(value);
+  if (entered.isEmpty) return '';
+  if (double.tryParse(entered.replaceAll(',', '')) == null) return entered;
+  final upper = normalizeHeader(rawHeading);
+  if (RegExp(r'(^|[^A-Z])KG(S)?($|[^A-Z])').hasMatch(upper) ||
+      upper.contains('KILOGRAM')) return '$entered kg';
+  if (RegExp(r'(^|[^A-Z])G(RAM|RAMS|M)?($|[^A-Z])').hasMatch(upper)) {
+    return '$entered g';
+  }
+  if (RegExp(r'(^|[^A-Z])LBS?($|[^A-Z])').hasMatch(upper) ||
+      upper.contains('POUND')) return '$entered lb';
+  return entered;
+}
+
 dynamic getExcelValue(xls.Data? cell) {
   final value = cell?.value;
   if (value == null) return null;
