@@ -47,6 +47,7 @@ class DisplayRoomItem {
   final String cbm;
   final double? fob;
   final double? weight;
+  final String weightText;
   final String materialSpecification;
   final String sizeRange;
   final List<String> images;
@@ -61,7 +62,7 @@ class DisplayRoomItem {
     required this.mimeType, required this.itemCode, required this.description,
     required this.uom, required this.quantity, required this.unitPrice,
     required this.subInventoryCode, required this.locatorId, required this.cbm,
-    required this.fob, required this.weight, required this.materialSpecification,
+    required this.fob, required this.weight, required this.weightText, required this.materialSpecification,
     required this.sizeRange, required this.images, required this.imageRecords});
 
   factory DisplayRoomItem.fromMasterDetail(Map<String, dynamic> master,
@@ -140,6 +141,9 @@ class DisplayRoomItem {
       quantity: d(explicitMoq ?? detail['quantity']), unitPrice: d(detail['unit_price']),
       subInventoryCode: s(detail['sub_inventory_code']), locatorId: i(detail['locator_id']),
       cbm: s(detail['cbm']), fob: d(detail['fob']), weight: d(detail['weight']),
+      weightText: s(detail['weight_text']).isNotEmpty
+          ? s(detail['weight_text'])
+          : (s(detail['weight']).isNotEmpty ? '${s(detail['weight'])} g' : ''),
       materialSpecification: s(detail['material_specification']),
       sizeRange: s(sizeRangeValue), images: photos, imageRecords: imageRecords,
     );

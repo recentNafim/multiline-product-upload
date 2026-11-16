@@ -664,10 +664,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         ['ITEM NAME', 'Conditional', 'Required when ITEM CODE is blank.'],
         ['ORG', 'Yes', 'Numeric Oracle organization ID; must be the same across all rows.'],
         ['FOB', 'Yes', 'Number greater than or equal to zero.'],
-        ['SIZE RANGE', 'Yes', 'For example 36-42 or a dimension such as 210 X 180 X 115CM.'],
+        ['SIZE RANGE', 'Optional', 'Any free-text size/dimension (e.g. S-M, 23 inches, 210 X 180 X 115CM). May be blank.'],
         ['MOQ', 'Yes', 'Number greater than zero.'],
         ['PICTURE', 'Optional', 'Leave blank to upload without images. Add or replace images later using Bulk Image Update.'],
-        ['WEIGHT', 'Optional', 'Grams or an explicit KG value (e.g. 2.3 KG). Numbers without a unit mean grams.'],
+        ['WEIGHT', 'Optional', 'Any free-text value (e.g. 2.3 KG, Approx. 5 kg, Lightweight). May be blank.'],
         ['CBM', 'Optional', 'Free-text CBM value.'],
         ['UOM', 'Optional', 'Product unit of measure.'],
         ['SUB INVENTORY CODE', 'Optional', 'Oracle subinventory code.'],
@@ -824,14 +824,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           row['PICTURE'] = inlinePictures.map((f) => f.name).join(';');
           embeddedFilesUsed.addAll(inlinePictures);
         }
-        // Excel may specify WEIGHT as "2.3 KG" or "2300 g". The API
-        // always stores grams. Unlabelled numbers retain the existing
-        // grams interpretation; never guess their unit.
-        final excelWeight = asText(row['WEIGHT']);
-        if (excelWeight.isNotEmpty) {
-          final grams = parseExcelWeightGrams(excelWeight);
-          if (grams != null) row['WEIGHT'] = grams;
-        }
+        // Keep WEIGHT exactly as supplied. Only an additional legacy
+        // numeric gram value is calculated at API payload time.
+        row['WEIGHT'] = asText(row['WEIGHT']);
         // Ignore only fully blank rows, after considering embedded images.
         if (row.values.every((value) => asText(value).isEmpty)) {
           continue;
@@ -1016,10 +1011,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
             row['MATERIAL SPECIFICATION'],
           ),
 
-          "weight":
-          asDouble(
-            row['WEIGHT'],
-          ),
+          "weight_text": asText(row['WEIGHT']),
+          "weight": parseExcelWeightGrams(row['WEIGHT']),
         };
       }).toList();
 
@@ -1159,9 +1152,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       "material_specification":
       materialSpecificationController.text.trim(),
 
-      "weight": double.tryParse(
-       weightController.text.trim(),
-       ),
+      "weight_text": weightController.text.trim(),
+      "weight": parseExcelWeightGrams(weightController.text),
 
        "size_range": normalizeSizeRange(sizeRangeController.text),
        "moq": double.tryParse(moqController.text.trim()),
@@ -1193,9 +1185,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     final cbmValue = detail['cbm'];
     detail['cbm'] = cbmValue == null ? '' : cbmValue.toString().trim();
 
-    // Ensure every Excel and manual detail sends the canonical Oracle
-    // SIZE_RANGE field as a trimmed JSON String (never a locator ID).
-    // Excel UI validates it as mandatory before this normalization step.
+    // Canonical Oracle SIZE_RANGE is optional free-form text.
     final String sizeRange = asText(
       detail['size_range'] ?? detail['sizeRange'] ?? detail['SIZE RANGE'],
     ).trim();
@@ -1203,18 +1193,18 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     detail.remove('sizeRange');
     detail.remove('SIZE RANGE');
 
-    // FOB and Weight remain numeric.
+    // FOB remains numeric; WEIGHT_TEXT preserves arbitrary user text.
     final fobValue = detail['fob'];
     if (fobValue is String) {
       final text = fobValue.trim();
       detail['fob'] = text.isEmpty ? null : double.tryParse(text);
     }
 
-    final weightValue = detail['weight'];
-    if (weightValue is String) {
-      final text = weightValue.trim();
-      detail['weight'] = text.isEmpty ? null : double.tryParse(text);
-    }
+    final weightText = asText(detail['weight_text'] ?? detail['weight']).trim();
+    detail['weight_text'] = weightText.isEmpty ? null : weightText;
+    // Keep the legacy NUMBER weight in grams if the value is recognizable.
+    // Arbitrary words are saved in WEIGHT_TEXT and never converted to 0.
+    detail['weight'] = parseExcelWeightGrams(weightText);
 
     // Internal upload/Excel metadata must never reach Oracle.
     detail.remove('_excel_serial');
@@ -1391,12 +1381,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         errors.add('Picture is required. Select at least one image.');
       }
     }
-    final weightText = weightController.text.trim();
-    if (!excelMode && weightText.isNotEmpty) {
-      final weight = double.tryParse(weightText);
-      if (weight == null || weight < 0 || !weight.isFinite) {
-        errors.add('Weight must be a non-negative number in grams (g).');
-      }
+    // Weight is optional free-form text. Validation must not reject it.
+    if (!excelMode && weightController.text.trim().length > 500) {
+      errors.add('Weight text must be within 500 characters');
     }
     return errors;
   }
@@ -1485,12 +1472,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
            rowErrors.add('Row $rowNo: MOQ greater than zero required');
          }
          if (validateSizeRange(row['SIZE RANGE']) != null) {
-           rowErrors.add('Row $rowNo: SIZE RANGE missing or too long');
+           rowErrors.add('Row $rowNo: SIZE RANGE text exceeds 500 characters');
          }
-         final weight = asText(row['WEIGHT']);
-         if (weight.isNotEmpty &&
-             (asDouble(row['WEIGHT']) == null || asDouble(row['WEIGHT'])! < 0)) {
-           rowErrors.add('Row $rowNo: WEIGHT must be valid grams');
+         if (asText(row['WEIGHT']).length > 500) {
+           rowErrors.add('Row $rowNo: WEIGHT text exceeds 500 characters');
          }
          if (asText(row['BUSINESS']).isNotEmpty &&
              asText(row['BUSINESS']).toLowerCase() != expectedBusiness) {
@@ -1574,22 +1559,17 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
          showError('Picture is mandatory');
          return;
        }
-       if (validateSizeRange(sizeRangeController.text) != null ||
-            double.tryParse(moqController.text.trim()) == null ||
+       if (double.tryParse(moqController.text.trim()) == null ||
            double.tryParse(moqController.text.trim())! <= 0 ||
            double.tryParse(fobController.text.trim()) == null ||
            double.tryParse(fobController.text.trim())! < 0) {
-          showError(
-            validateSizeRange(sizeRangeController.text) ??
-            'MOQ (> 0) and valid FOB are mandatory',
-          );
+          showError('MOQ (> 0) and valid FOB are mandatory');
          return;
        }
        details = [createManualDetail()];
      }
 
-    // Validate the final detail payload too. This prevents an empty
-    // size_range from being posted when users edit manual/Excel values.
+    // Size is optional; only enforce the DB storage length when provided.
     for (var index = 0; index < details.length; index++) {
       final raw = details[index];
       final String sizeRange = asText(
@@ -2760,22 +2740,13 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: buildTextField(
-                        label: 'Weight (g)',
-                        hint: 'In grams, e.g. 130',
+                        label: 'Weight (Optional)',
+                        hint: 'Any text: 2.3 KG, Approx. 5 kg, Lightweight',
                         controller: weightController,
                         required: false,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                        ),
-                        validator: (value) {
-                          final text = (value ?? '').trim();
-                          if (text.isEmpty) return null;
-                          final grams = double.tryParse(text);
-                          if (grams == null || grams < 0 || !grams.isFinite) {
-                            return 'Enter a non-negative weight in grams (g)';
-                          }
-                          return null;
-                        },
+                        validator: (value) => (value ?? '').trim().length > 500
+                            ? 'Maximum 500 characters'
+                            : null,
                       ),
                     ),
                   ],
@@ -2831,9 +2802,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
 
                  twoFields(
                    first: buildTextField(
-                     label: 'Size Range',
-                      hint: 'e.g. 36-42',
+                     label: 'Size / Dimensions (Optional)',
+                      hint: 'Any text: S-M, 23 inches, 210 x 180 cm',
                      controller: sizeRangeController,
+                     required: false,
                       validator: (value) => validateSizeRange(value),
                    ),
                    second: buildTextField(

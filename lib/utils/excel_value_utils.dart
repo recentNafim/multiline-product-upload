@@ -66,24 +66,19 @@ Map<String, dynamic> platformFileToImageJson(PlatformFile file) {
   };
 }
 
-/// Footwear sizes stay as 36-42. Other products (tents, umbrellas, etc.)
-/// may describe their dimensions in the same text column.
-String normalizeSizeRange(dynamic value) {
-  return asText(value).trim().replaceAll(RegExp(r'\s*[-–—]\s*'), '-');
-}
+/// Preserve free-form size/dimension text exactly apart from edge spaces.
+String normalizeSizeRange(dynamic value) => asText(value).trim();
 
-/// Oracle accepts any non-empty textual SIZE_RANGE / dimensions string.
-/// Do not reject real inventory files based on footwear-specific grammar.
+/// SIZE RANGE is optional and free-form. No footwear-specific validation.
+/// The Oracle VARCHAR2(500) storage still imposes its technical limit.
 String? validateSizeRange(dynamic value) {
   final range = normalizeSizeRange(value);
-  if (range.isEmpty) return 'Size Range / Dimensions is mandatory';
-  if (range.length > 100) return 'Size Range / Dimensions must be within 100 characters';
+  if (range.length > 500) return 'Size/Dimensions cannot exceed 500 characters';
   return null;
 }
 
-/// Convert explicitly labelled Excel weights to grams, as required by the
-/// API. Bare numeric cells have always meant grams and continue to do so.
-/// Returns null for an invalid weight, which the caller should reject.
+/// Legacy numeric grams helper. Arbitrary text is always saved separately
+/// in WEIGHT_TEXT; null here is valid and must never reject an upload.
 double? parseExcelWeightGrams(dynamic value) {
   final raw = asText(value).replaceAll(',', '').trim();
   if (raw.isEmpty) return null;

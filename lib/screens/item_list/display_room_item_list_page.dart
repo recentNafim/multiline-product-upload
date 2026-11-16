@@ -13,6 +13,19 @@ class DisplayRoomItemListPage extends StatefulWidget {
   State<DisplayRoomItemListPage> createState() => _DisplayRoomItemListPageState();
 }
 
+double? _legacyWeightInGrams(String value) {
+  final raw = value.trim().replaceAll(',', '');
+  final match = RegExp(
+    r'^([0-9]+(?:\.[0-9]+)?)\s*(KG|KGS|KILOGRAMS?|G|GRAMS?)?$',
+    caseSensitive: false,
+  ).firstMatch(raw);
+  if (match == null) return null;
+  final number = double.tryParse(match.group(1)!);
+  if (number == null || !number.isFinite || number < 0) return null;
+  return (match.group(2) ?? 'g').toLowerCase().startsWith('k')
+      ? number * 1000 : number;
+}
+
 class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
   final searchController = TextEditingController();
   bool isLoading = false;
@@ -82,6 +95,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
     final code = TextEditingController(text: item.itemCode);
     final description = TextEditingController(text: item.description);
     final size = TextEditingController(text: item.sizeRange);
+    final weight = TextEditingController(text: item.weightText);
     final moq = TextEditingController(text: item.quantity?.toString() ?? '');
     final fob = TextEditingController(text: item.fob?.toString() ?? '');
     final category = TextEditingController(text: item.productCategory);
@@ -153,7 +167,8 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                 _field(category, 'Item Category'),
                 _field(buyer, 'Buyer'),
                 _field(roomName, 'Display Room Name'),
-                _field(size, 'Size Range'),
+                _field(size, 'Size / Dimensions (Optional)'),
+                _field(weight, 'Weight (Optional - Free Text)'),
                 _field(moq, 'MOQ', numeric: true),
                 _field(fob, 'FOB', numeric: true),
                 _field(updatedBy, 'Updated By', numeric: true),
@@ -249,14 +264,12 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                 if (category.text.trim().isEmpty) {
                   errors.add('Item Category is required');
                 }
-                final normalizedSize = size.text.trim().replaceAll(
-                  RegExp(r'\s*-\s*'), '-',
-                );
-                final match = RegExp(r'^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$')
-                    .firstMatch(normalizedSize);
-                if (match == null ||
-                    double.parse(match.group(1)!) > double.parse(match.group(2)!)) {
-                  errors.add('Size Range must be like 36-42');
+                final normalizedSize = size.text.trim();
+                if (normalizedSize.length > 500) {
+                  errors.add('Size/Dimensions must be within 500 characters');
+                }
+                if (weight.text.trim().length > 500) {
+                  errors.add('Weight must be within 500 characters');
                 }
                 if (newMoq == null || newMoq <= 0) {
                   errors.add('MOQ must be greater than 0');
@@ -323,7 +336,8 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                       'cbm': item.cbm,
                       'fob': newFob,
                       'material_specification': item.materialSpecification,
-                      'weight': item.weight,
+                      'weight_text': weight.text.trim(),
+                      'weight': _legacyWeightInGrams(weight.text),
                       if (removedImageIds.isNotEmpty)
                         'images_to_delete': [
                           for (final sl in removedImageIds) {'sl': sl},
