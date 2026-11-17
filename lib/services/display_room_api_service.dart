@@ -22,6 +22,14 @@ class DisplayRoomApiService {
     headers: const {'Accept': 'application/json'},
   ).timeout(const Duration(seconds: 60));
 
+  static Future<http.Response> getItemsPage({required int page, int limit = 100}) => http.get(
+    Uri.parse(ApiConstants.listItems).replace(queryParameters: {
+      'p_page': '$page',
+      'p_limit': '$limit',
+    }),
+    headers: const {'Accept': 'application/json'},
+  ).timeout(const Duration(seconds: 60));
+
   static Future<http.Response> getItems() => http.get(
     Uri.parse(ApiConstants.listItems),
     headers: const {'Accept': 'application/json'},

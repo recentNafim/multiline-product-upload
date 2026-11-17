@@ -97,7 +97,16 @@ Map<int, List<PlatformFile>> readExcelEmbeddedPictures(
     if (from == null) continue;
     final col = int.tryParse(_directXmlChild(from, 'col')?.innerText ?? '');
     final row = int.tryParse(_directXmlChild(from, 'row')?.innerText ?? '');
-    if (col != pictureColumnIndex || row == null || row < 1) continue;
+    // Some Excel editors anchor a pasted image just to the left of the
+    // PICTURE cell and stretch it across that column. Accept overlap, but
+    // never import unrelated photos from another column.
+    final to = _directXmlChild(anchor, 'to');
+    final lastCol = int.tryParse(_directXmlChild(to ?? from, 'col')?.innerText ?? '');
+    final overlapsPicture = col != null &&
+        (col == pictureColumnIndex ||
+         (lastCol != null && col <= pictureColumnIndex &&
+             lastCol >= pictureColumnIndex));
+    if (!overlapsPicture || row == null || row < 1) continue;
 
     // Excel supports several shapes per cell; allow up to five pictures.
     for (final pic in anchor.descendants.whereType<XmlElement>().where(

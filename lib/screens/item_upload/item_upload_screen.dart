@@ -138,42 +138,71 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         .toList();
   }
 
-  List<Map<String, dynamic>> _excelImagesPayloadForDetail(
-      Map<String, dynamic> detail,
-      ) {
-    final int serial = asInt(detail['_excel_serial']) ?? 0;
+  /// Match Excel images to one specific product. The example customer Excel
+  /// may have an empty PICTURE column and zero embedded media objects.
+  /// Users can then select JPG/PNG/WebP files named ITEMCODE.jpg,
+  /// ITEMCODE__1.jpg, ITEMCODE__2.png, etc. without editing Excel cells.
+  /// Preserve the existing per-row original-photo override first.
+  List<PlatformFile> _excelPhotosForDetail(Map<String, dynamic> detail) {
+    final serial = asInt(detail['_excel_serial']) ?? 0;
     final originals = originalExcelPhotosBySerial[serial];
-    if (originals != null && originals.isNotEmpty) {
-      // EXACT original selected bytes. No resizing, thumbnail extraction,
-      // recompression, image conversion, or quality reduction.
-      return originals.map(platformFileToImageJson).toList();
-    }
+    if (originals != null && originals.isNotEmpty) return originals;
+
     final rawNames = detail['_image_names'];
-
-    final List<String> expectedNames = rawNames is List
-        ? rawNames
-        .map((e) => e.toString().trim())
-        .where((e) => e.isNotEmpty)
-        .toList()
+    final expectedNames = rawNames is List
+        ? rawNames.map((name) => name.toString().trim())
+            .where((name) => name.isNotEmpty).toList()
         : <String>[];
-
-    if (expectedNames.isEmpty) {
-      return <Map<String, dynamic>>[];
-    }
-
-    // Follow the order of images in this Excel row (not the order in which
-    // files were selected); this determines image number 01, 02, ...
     final filesByName = <String, PlatformFile>{
       for (final file in selectedExcelImages)
-        if (file.bytes != null) file.name.toLowerCase(): file,
+        if (file.bytes != null && file.bytes!.isNotEmpty)
+          file.name.toLowerCase(): file,
     };
-    return expectedNames
-        .map((name) => filesByName[name.toLowerCase()])
-        .whereType<PlatformFile>()
-        .take(5)
-        .map(platformFileToImageJson)
-        .toList();
+
+    if (expectedNames.isNotEmpty) {
+      return expectedNames
+          .map((name) => filesByName[name.replaceAll('\\', '/').split('/').last.toLowerCase()])
+          .whereType<PlatformFile>().take(5).toList();
+    }
+
+    final code = asText(detail['item_code']).trim();
+    if (code.isEmpty) return <PlatformFile>[];
+    // Avoid silently assigning the same selected image to different rows.
+    if (excelDetails.where((row) =>
+        asText(row['item_code']).toLowerCase() == code.toLowerCase()).length != 1) {
+      return <PlatformFile>[];
+    }
+    final prefix = code.toLowerCase();
+    final matches = <PlatformFile>[];
+    for (final file in selectedExcelImages) {
+      if (file.bytes == null || file.bytes!.isEmpty) continue;
+      final filename = file.name.toLowerCase();
+      final dot = filename.lastIndexOf('.');
+      if (dot < 0) continue;
+      final extension = filename.substring(dot + 1);
+      if (!const <String>{'jpg', 'jpeg', 'png', 'webp', 'gif'}.contains(extension)) continue;
+      final stem = filename.substring(0, dot);
+      if (stem == prefix ||
+          RegExp('^${RegExp.escape(prefix)}(?:__|_)[0-9]+\$').hasMatch(stem)) {
+        matches.add(file);
+      }
+    }
+    // Base picture first, then __1, __2. Keep gallery ordering predictable.
+    matches.sort((a, b) {
+      int order(PlatformFile f) {
+        final stem = f.name.toLowerCase().split('.').first;
+        if (stem == prefix) return 0;
+        return int.tryParse(stem.substring(prefix.length).replaceFirst(RegExp(r'^_+'), '')) ?? 9999;
+      }
+      final cmp = order(a).compareTo(order(b));
+      return cmp == 0 ? a.name.compareTo(b.name) : cmp;
+    });
+    return matches.take(5).toList();
   }
+
+  List<Map<String, dynamic>> _excelImagesPayloadForDetail(
+    Map<String, dynamic> detail,
+  ) => _excelPhotosForDetail(detail).map(platformFileToImageJson).toList();
 
   /// Stops silent low-quality uploads. Existing Excel cells may contain
   /// thumbnail JPEGs (e.g. 92x69) even though Excel draws them quite large.
@@ -182,26 +211,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     final bool excelMode = excelDetails.isNotEmpty;
     final List<PlatformFile> files;
     if (excelMode) {
-      final filesByName = <String, PlatformFile>{
-        for (final file in selectedExcelImages)
-          if (file.bytes != null) file.name.toLowerCase(): file,
-      };
       files = <PlatformFile>[
-        for (final detail in excelDetails)
-          ...(() {
-            final serial = asInt(detail['_excel_serial']) ?? 0;
-            final originals = originalExcelPhotosBySerial[serial];
-            if (originals != null && originals.isNotEmpty) {
-              return originals;
-            }
-            final names = detail['_image_names'];
-            return <PlatformFile>[
-              if (names is List)
-                for (final name in names)
-                  if (filesByName[name.toString().toLowerCase()] != null)
-                    filesByName[name.toString().toLowerCase()]!,
-            ];
-          })(),
+        for (final detail in excelDetails) ..._excelPhotosForDetail(detail),
       ];
     } else {
       files = List<PlatformFile>.from(selectedImages);
@@ -768,6 +779,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       );
       final embeddedFilesUsed = <PlatformFile>[];
 
+      final embeddedImageCount = embeddedPictures.values
+          .fold<int>(0, (sum, images) => sum + images.length);
+      debugPrint('Excel embedded pictures found: $embeddedImageCount. '
+          'If zero, select original image files separately using the item code.');
       debugPrint('Excel Headers: $headers');
 
       // ========================================================
@@ -1528,9 +1543,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
          if (names is List) {
            for (final name in names) {
              final filename = name.toString().trim();
-             if (filename.isNotEmpty &&
-                 !filesByName.contains(filename.toLowerCase())) {
-               missingImages.add(filename);
+             final basename = filename.replaceAll('\\', '/').split('/').last;
+             if (basename.isNotEmpty &&
+                 !filesByName.contains(basename.toLowerCase())) {
+               missingImages.add(basename);
              }
            }
          }
@@ -1539,6 +1555,24 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
          showError('Missing picture files: ${missingImages.join(', ')}');
          return;
        }
+       // Prevent a misleading 'upload successful' when selected image files
+       // were ignored because their filenames do not match any Excel item.
+       final matchedFileNames = <String>{
+         for (final detail in excelDetails)
+           for (final image in _excelPhotosForDetail(detail))
+             image.name.toLowerCase(),
+       };
+       final unmatched = selectedExcelImages.where((file) =>
+           !file.name.toLowerCase().startsWith('excel_row_') &&
+           !matchedFileNames.contains(file.name.toLowerCase())).toList();
+       if (unmatched.isNotEmpty) {
+         showError('These selected pictures do not match an Excel Item Code or '
+             'PICTURE filename: ${unmatched.take(8).map((f) => f.name).join(', ')}. '
+             'Rename each file ITEMCODE.jpg or ITEMCODE__1.png, '
+             'or select a picture for the row.');
+         return;
+       }
+
        final missing3DModels = _missingExcel3DModelFiles();
 
       if (missing3DModels.isNotEmpty) {
@@ -1987,7 +2021,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               'Buyer and Display Room Name are separate columns in the latest Excel template. '
               'Product pictures are OPTIONAL for Excel upload. Leave the PICTURE cell blank '
               'and skip image selection to upload an item without a photo. '
-              'If you include pictures, selected original JPG/PNG bytes override '
+              'When PICTURE is blank, select ITEMCODE.jpg / ITEMCODE__1.png images; original bytes override '
               'small embedded thumbnails. You can add pictures later via Bulk Image Update. '
               'ITEM CODE is optional; image filenames are generated on submit.',
             ),
@@ -2006,6 +2040,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                   final sizes = originalExcelPhotoDimensions[serial] ??
                       const <String>[];
                   final busy = readingOriginalPhotosForSerial == serial;
+                  final attachedPhotos = _excelPhotosForDetail(row);
                   return Card(
                     margin: const EdgeInsets.only(bottom: 5),
                     child: Padding(
@@ -2029,10 +2064,12 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                                   photos.isNotEmpty
                                       ? '${photos.length} original photo(s): '
                                           '${sizes.join(', ')}'
-                                      : (row['_image_names'] is List &&
-                                              (row['_image_names'] as List).isNotEmpty)
-                                          ? 'Excel image attached / referenced'
-                                          : 'No image (allowed; add one later)',
+                                      : attachedPhotos.isNotEmpty
+                                          ? '${attachedPhotos.length} image(s) matched for upload'
+                                          : (row['_image_names'] is List &&
+                                                  (row['_image_names'] as List).isNotEmpty)
+                                              ? 'Excel picture filename: select its JPG/PNG file'
+                                              : 'No image: choose ITEMCODE.jpg or Select',
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
@@ -2096,15 +2133,15 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               label: Text(
                 isReadingExcelImages
                     ? 'Reading Images...'
-                    : 'Select Images (Legacy Excel Only)',
+                    : 'Select Product Images (match Item Code)',
               ),
             ),
 
             const SizedBox(height: 8),
 
             Text(
-              'Excel-এ PICTURE ফাঁকা রাখতে পারবেন। ছবি থাকলে cell-এ paste করুন '
-                  'অথবা filename লিখে সেই original file select করুন। ছবি দেওয়া থাকলেই কেবল '
+              'Excel-এ PICTURE ফাঁকা রাখতে পারবেন। ছবির জন্য ITEMCODE.jpg, '
+                  'ITEMCODE__1.jpg নামে original image select করুন, অথবা cell-এ ছবি paste করুন। '
                   'Item Code + Item Name + Serial + Image Number + Date + Time অনুযায়ী filename তৈরি হবে।',
               style: TextStyle(
                 fontSize: 12,

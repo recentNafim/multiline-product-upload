@@ -6,6 +6,7 @@ import '../../models/display_room_item.dart';
 import '../../core/constants/api_constants.dart';
 import '../../utils/auto_image_file_name.dart';
 import '../../services/display_room_api_service.dart';
+import 'product_edit_page.dart';
 
 class DisplayRoomItemListPage extends StatefulWidget {
   const DisplayRoomItemListPage({super.key});
@@ -43,29 +44,44 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
     if (isLoading) return;
     setState(() {isLoading = true; error = null;});
     try {
-      final response = await DisplayRoomApiService.getItems();
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('HTTP ${response.statusCode}: ${response.body}');
-      }
-      final decoded = jsonDecode(response.body);
-      final data = decoded is Map ? (decoded['data'] ?? decoded['items']) : decoded;
       final result = <DisplayRoomItem>[];
-      if (data is List) {
+      final seen = <String>{};
+      var page = 1;
+      const limit = 100; // ORDS GET upper limit
+      while (true) {
+        final response = await DisplayRoomApiService.getItemsPage(page: page, limit: limit);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw Exception('HTTP ${response.statusCode}: ${response.body}');
+        }
+        final decoded = jsonDecode(response.body);
+        if (decoded is Map && decoded['status_code']?.toString() != '200') {
+          throw Exception(decoded['message'] ?? 'Unable to load product list');
+        }
+        final data = decoded is Map ? (decoded['data'] ?? decoded['items']) : decoded;
+        if (data is! List || data.isEmpty) break;
+        var newMasters = 0;
         for (final raw in data) {
           if (raw is! Map) continue;
           final master = Map<String, dynamic>.from(raw);
+          final key = master['sl']?.toString();
+          if (key != null && !seen.add(key)) continue;
+          newMasters++;
           final details = master['details'];
           if (details is List && details.isNotEmpty) {
-            for (final item in details) {
-              if (item is Map) {
+            for (final detail in details) {
+              if (detail is Map) {
                 result.add(DisplayRoomItem.fromMasterDetail(
-                  master, Map<String, dynamic>.from(item)));
+                    master, Map<String, dynamic>.from(detail)));
               }
             }
-          } else if (master.containsKey('item_code')) {
-            result.add(DisplayRoomItem.fromMasterDetail(master, master));
           }
         }
+        final totalPages = decoded is Map
+            ? int.tryParse(decoded['total_pages']?.toString() ?? '') : null;
+        if (newMasters == 0 ||
+            (totalPages != null && page >= totalPages) ||
+            (totalPages == null && data.length < limit)) break;
+        page++;
       }
       if (!mounted) return;
       setState(() => items = result);
@@ -511,7 +527,15 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                   maxLines: 3, overflow: TextOverflow.ellipsis),
                 isThreeLine: true,
                 trailing: IconButton(tooltip: 'Edit', icon: const Icon(Icons.edit_outlined),
-                  onPressed: () => openEditSheet(p)),
+                  onPressed: () async {
+                    final updated = await Navigator.of(context).push<bool>(
+                      MaterialPageRoute(builder: (_) => ProductEditPage(product: p)),
+                    );
+                    if (updated == true) {
+                      _message('Product updated successfully');
+                      await getItems();
+                    }
+                  }),
               ),
             );
           })),
