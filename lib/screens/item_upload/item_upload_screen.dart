@@ -33,6 +33,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   bool isReadingExcel = false;
 
   String? selectedExcelName;
+  int embeddedExcelPictureCount = 0; // Count directly extracted from XLSX. 
 
   // Remains visible after the upload form is cleared.
   String? _submissionNotice;
@@ -782,7 +783,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       final embeddedImageCount = embeddedPictures.values
           .fold<int>(0, (sum, images) => sum + images.length);
       debugPrint('Excel embedded pictures found: $embeddedImageCount. '
-          'If zero, select original image files separately using the item code.');
+          'Includes grouped Excel drawing shapes; if zero, select original '
+          'image files separately using the item code.');
       debugPrint('Excel Headers: $headers');
 
       // ========================================================
@@ -858,6 +860,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         // When no filename is supplied, import its bytes automatically.
         final inlinePictures = embeddedPictures[rowIndex] ?? <PlatformFile>[];
         if (inlinePictures.isNotEmpty) {
+          // This includes grouped-shape pictures and shared image relationships.
           // Embedded pictures take precedence over any text or old filename.
           // The user does not need to type a picture filename in Excel.
           row['PICTURE'] = inlinePictures.map((f) => f.name).join(';');
@@ -1059,6 +1062,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         originalExcelPhotosBySerial.clear();
         originalExcelPhotoDimensions.clear();
         selectedExcelName = file.name;
+        embeddedExcelPictureCount = embeddedImageCount;
         excelDetails = details;
         const hiddenLegacyHeaders = <String>{
            'PRINT ITEM', 'QR CODE', 'TRACK MARK', 'FACTORY',
@@ -1099,7 +1103,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         SnackBar(
           backgroundColor: Colors.green,
           content: Text(
-            '${details.length} Excel rows loaded (format-independent)',
+            '${details.length} Excel products, $embeddedImageCount embedded image(s) ready. '
+            'Review the per-row photo count before upload.',
           ),
         ),
       );
@@ -1112,6 +1117,181 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
         setState(() => isReadingExcel = false);
       }
     }
+  }
+
+  /// Recover embedded pictures for products that were ALREADY imported by an
+  /// older upload version without images. Unlike normal Excel POST, this does
+  /// not insert a new product. It only uses the deployed IMAGE_ONLY PUT mode.
+  /// For safety, duplicate Item Codes, different organizations and products
+  /// with an existing gallery/primary picture are skipped, never overwritten.
+  Future<void> restoreExistingExcelPictures() async {
+    if (isLoading || excelDetails.isEmpty) return;
+    final staffId = int.tryParse(createdByController.text.trim());
+    if (staffId == null || staffId <= 0) {
+      showError('Enter your Staff ID / Created By before restoring pictures.');
+      return;
+    }
+    final rowsWithPictures = excelDetails.where((detail) =>
+        _excelPhotosForDetail(detail).isNotEmpty).toList();
+    if (rowsWithPictures.isEmpty) {
+      showError('No Excel pictures were matched. Select an Excel containing '
+          'embedded pictures or choose source images for each product.');
+      return;
+    }
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Restore pictures to existing products?'),
+        content: Text(
+          '${rowsWithPictures.length} Excel product(s) have pictures. '
+          'This action finds each already-uploaded product by EXACT Item Code '
+          'and uploads its missing images. It will NOT create products or '
+          'overwrite an existing gallery. Ambiguous matches are skipped. '
+          'Use this instead of uploading the same Excel again.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Restore missing pictures')),
+        ],
+      ),
+    );
+    if (proceed != true || !mounted) return;
+    setState(() => isLoading = true);
+    var completed = 0;
+    var skipped = 0;
+    final failures = <String>[];
+    try {
+      // Never probe by sending an IMAGE_ONLY request to an old PUT handler.
+      final probe = await DisplayRoomApiService.updateItem(
+        <String, dynamic>{'mode': 'CAPABILITY_CHECK'},
+      );
+      final probeBody = jsonDecode(probe.body);
+      if (probe.statusCode < 200 || probe.statusCode >= 300 ||
+          probeBody is! Map || probeBody['supports_image_only'] != true) {
+        throw const FormatException('Deployed PUT API does not support safe '
+            'IMAGE_ONLY updates. Install the supplied PUT handler first.');
+      }
+
+      for (final detail in rowsWithPictures) {
+        final code = asText(detail['item_code']).trim();
+        if (code.isEmpty) {
+          skipped++;
+          failures.add('No Item Code: cannot identify an existing product');
+          continue;
+        }
+        try {
+          final response = await DisplayRoomApiService.getItemsByCode(code);
+          final decoded = jsonDecode(response.body);
+          if (!_isConfirmedApiSuccess(response, decoded) || decoded is! Map) {
+            throw FormatException('GET lookup failed for $code');
+          }
+          final masters = decoded['data'];
+          final totalMasters = int.tryParse('${decoded['total_records']}') ?? 0;
+          if (masters is! List || totalMasters != 1) {
+            throw FormatException('Not exactly one matching master for $code');
+          }
+          final found = <Map<String, dynamic>>[];
+          int? selectedMaster;
+          for (final master in masters) {
+            if (master is! Map) continue;
+            final masterId = int.tryParse('${master['sl']}');
+            final items = master['details'];
+            if (items is! List || masterId == null) continue;
+            for (final item in items) {
+              if (item is! Map ||
+                  asText(item['item_code']).toUpperCase() != code.toUpperCase()) {
+                continue;
+              }
+              selectedMaster = masterId;
+              found.add(Map<String, dynamic>.from(item));
+            }
+          }
+          if (found.length != 1 || selectedMaster == null) {
+            throw FormatException('Duplicate / missing Item Code $code');
+          }
+          final existing = found.single;
+          final detailId = int.tryParse('${existing['sl']}');
+          if (detailId == null) throw FormatException('Detail SL missing for $code');
+          final orgFromExcel = int.tryParse(
+              asText(excelTableRows.firstWhere(
+                  (row) => asText(row['ITEM CODE']).toUpperCase() == code.toUpperCase(),
+                  orElse: () => <String, dynamic>{})['ORG']));
+          final orgFromApi = int.tryParse('${existing['organization_id']}');
+          if (orgFromExcel != null && orgFromApi != orgFromExcel) {
+            throw FormatException('Organization mismatch for $code');
+          }
+          final images = existing['images'];
+          final hasGallery = images is List && images.isNotEmpty;
+          final hasPrimary = asText(existing['file_url']).isNotEmpty;
+          if (hasGallery || hasPrimary) {
+            skipped++; // Avoid destructive overwrite of any existing photo.
+            continue;
+          }
+          final sourceImages = _excelImagesPayloadForDetail(detail);
+          if (sourceImages.isEmpty || sourceImages.length > 5) {
+            throw FormatException('Expected 1–5 pictures for $code');
+          }
+          final namedImages = assignAutomaticImageFileNames(
+            images: sourceImages,
+            itemCode: code,
+            itemName: asText(detail['description']),
+            excelSerial: asInt(detail['_excel_serial']) ?? 1,
+            uploadTime: DateTime.now(),
+          );
+          final putResponse = await DisplayRoomApiService.updateItem(
+            <String, dynamic>{
+              'mode': 'IMAGE_ONLY',
+              'master_sl': selectedMaster,
+              'updated_by': staffId,
+              'details': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'sl': detailId,
+                  'item_code': code,
+                  'images_to_delete': <Map<String, dynamic>>[],
+                  'images_to_add': namedImages,
+                },
+              ],
+            },
+          );
+          final putBody = jsonDecode(putResponse.body);
+          if (!_isConfirmedApiSuccess(putResponse, putBody) ||
+              putBody is! Map || putBody['mode'] != 'IMAGE_ONLY' ||
+              int.tryParse('${putBody['added_images']}') != namedImages.length) {
+            throw FormatException('Image update failed: '
+                '${putBody is Map ? putBody['message'] : putResponse.body}');
+          }
+          completed++;
+        } catch (error) {
+          failures.add('$code: $error');
+        }
+        if (mounted) setState(() {});
+      }
+    } catch (error) {
+      failures.insert(0, 'RESTORE BLOCKED: $error');
+    } finally {
+      if (mounted) setState(() => isLoading = false);
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Image restore result'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 540),
+          child: SingleChildScrollView(
+            child: Text('Restored: $completed product(s)\n'
+                'Skipped existing galleries: $skipped\n'
+                'Failed: ${failures.length}\n\n'
+                '${failures.take(12).join('\n')}\n\n'
+                'Do not POST the same Excel again: that creates duplicate '
+                'products. Check the Dashboard after refreshing.'),
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'))],
+      ),
+    );
   }
 
   void setControllerIfAvailable(
@@ -1132,6 +1312,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   void removeExcel() {
     setState(() {
       selectedExcelName = null;
+      embeddedExcelPictureCount = 0;
       excelDetails = [];
       excelTableHeaders = [];
       excelTableRows = [];
@@ -1329,6 +1510,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     statusController.text = 'ACTIVE';
     setState(() {
       selectedExcelName = null;
+      embeddedExcelPictureCount = 0;
       excelDetails = <Map<String, dynamic>>[];
       excelTableHeaders = <String>[];
       excelTableRows = <Map<String, dynamic>>[];
@@ -1562,6 +1744,27 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
            for (final image in _excelPhotosForDetail(detail))
              image.name.toLowerCase(),
        };
+       // An original-resolution per-row override intentionally replaces an
+       // embedded thumbnail. It must not be treated as an unmapped picture.
+       final replacedEmbeddedNames = <String>{
+         for (final detail in excelDetails)
+           if (originalExcelPhotosBySerial[asInt(detail['_excel_serial']) ?? 0]
+                   ?.isNotEmpty == true)
+             for (final name in (detail['_image_names'] is List
+                 ? detail['_image_names'] as List : const <dynamic>[]))
+               name.toString().toLowerCase(),
+       };
+       final unmatchedEmbedded = selectedExcelImages.where((file) =>
+           file.name.toLowerCase().startsWith('excel_row_') &&
+           !matchedFileNames.contains(file.name.toLowerCase()) &&
+           !replacedEmbeddedNames.contains(file.name.toLowerCase())).toList();
+       if (unmatchedEmbedded.isNotEmpty) {
+         showError('Some embedded Excel pictures could not be mapped to '
+             'their product row: '
+             '${unmatchedEmbedded.take(8).map((file) => file.name).join(', ')}. '
+             'Upload cancelled to avoid creating products without photos.');
+         return;
+       }
        final unmatched = selectedExcelImages.where((file) =>
            !file.name.toLowerCase().startsWith('excel_row_') &&
            !matchedFileNames.contains(file.name.toLowerCase())).toList();
@@ -2000,7 +2203,8 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                         ),
 
                         Text(
-                          '${excelDetails.length} item(s) loaded',
+                          '${excelDetails.length} item(s), '
+                          '$embeddedExcelPictureCount embedded picture(s) extracted',
                         ),
                       ],
                     ),
@@ -2009,6 +2213,22 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               ),
             ),
 
+            const SizedBox(height: 12),
+            if (embeddedExcelPictureCount > 0 || selectedExcelImages.isNotEmpty)
+              OutlinedButton.icon(
+                onPressed: isLoading ? null : restoreExistingExcelPictures,
+                icon: const Icon(Icons.restore_outlined),
+                label: const Text('Restore Excel pictures to ALREADY uploaded products'),
+              ),
+            if (embeddedExcelPictureCount > 0 || selectedExcelImages.isNotEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 5, bottom: 8),
+                child: Text(
+                  'For products previously saved without photos. Uses safe IMAGE_ONLY PUT; '
+                  'no new products are inserted. Keep this separate from normal POST upload.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
             const SizedBox(height: 14),
             Text(
               'Original-resolution product photos (optional)',
@@ -2049,6 +2269,21 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                       ),
                       child: Row(
                         children: [
+                          if (attachedPhotos.isNotEmpty &&
+                              attachedPhotos.first.bytes != null) ...[
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(7),
+                              child: Image.memory(
+                                attachedPhotos.first.bytes!,
+                                width: 54,
+                                height: 54,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) =>
+                                    const Icon(Icons.broken_image_outlined, size: 34),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                          ],
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,

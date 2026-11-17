@@ -11,7 +11,9 @@ import 'package:xml/xml.dart';
 // pictures pasted on F2/F3 can be uploaded without selecting separate files.
 //
 // Keys in the result are zero-based Excel row indexes (header is row 0).
-// A picture is accepted only when its top-left anchor is in PICTURE column.
+// A picture is accepted only when its drawing anchor intersects PICTURE.
+// Handles xdr:pic, grouped xdr:sp with a:blipFill, shared image media,
+// and both one/two-cell anchors without changing the XLSX file.
 Map<int, List<PlatformFile>> readExcelEmbeddedPictures(
   Uint8List xlsxBytes, {
   required int pictureColumnIndex,
@@ -108,15 +110,17 @@ Map<int, List<PlatformFile>> readExcelEmbeddedPictures(
              lastCol >= pictureColumnIndex));
     if (!overlapsPicture || row == null || row < 1) continue;
 
-    // Excel supports several shapes per cell; allow up to five pictures.
-    for (final pic in anchor.descendants.whereType<XmlElement>().where(
-          (element) => element.name.local == 'pic',
+    // IMPORTANT: customers often paste Excel pictures as Grouped Shapes.
+    // Those are <xdr:grpSp><xdr:sp><a:blipFill><a:blip r:embed="..." />
+    // and contain NO <xdr:pic> element. Looking only for 'pic' silently
+    // discarded every photograph in display_room_Initial List -2.xlsx.
+    // A blip is the OOXML image reference in regular pics AND grouped shapes.
+    // Scan every image blip under THIS anchor, never the entire drawing, so
+    // the actual zero-based Excel row stays associated with its image.
+    for (final blip in anchor.descendants.whereType<XmlElement>().where(
+          (element) => element.name.local == 'blip',
         )) {
-      final blips = pic.descendants.whereType<XmlElement>().where(
-            (element) => element.name.local == 'blip',
-          );
-      if (blips.isEmpty) continue;
-      final imageRelId = blips.first.getAttribute(
+      final imageRelId = blip.getAttribute(
         'embed',
         namespace: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
       );
