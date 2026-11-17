@@ -20,6 +20,7 @@ class ProductEditPage extends StatefulWidget {
 
 class _ProductEditPageState extends State<ProductEditPage> {
   late final TextEditingController name;
+  late final TextEditingController business;
   late final TextEditingController category;
   late final TextEditingController buyer;
   late final TextEditingController itemCode;
@@ -41,6 +42,7 @@ class _ProductEditPageState extends State<ProductEditPage> {
   void initState() {
     super.initState();
     name = TextEditingController(text: item.description);
+    business = TextEditingController(text: item.business);
     category = TextEditingController(text: item.productCategory);
     buyer = TextEditingController(text: item.buyer);
     itemCode = TextEditingController(text: item.itemCode);
@@ -58,7 +60,7 @@ class _ProductEditPageState extends State<ProductEditPage> {
   @override
   void dispose() {
     for (final controller in <TextEditingController>[
-      name, category, buyer, itemCode, displayRoom, sizeRange,
+      name, business, category, buyer, itemCode, displayRoom, sizeRange,
       weightText, moq, fob, updatedBy, material, cbm,
     ]) {
       controller.dispose();
@@ -151,6 +153,9 @@ class _ProductEditPageState extends State<ProductEditPage> {
     final userId = int.tryParse(updatedBy.text.trim());
     final problems = <String>[];
     if (name.text.trim().isEmpty) problems.add('Item Name is required');
+    if (business.text.trim().isEmpty) problems.add('Business is required');
+    if (business.text.trim().length > 500) problems.add('Business exceeds 500 characters');
+    if (buyer.text.trim().length > 500) problems.add('Buyer exceeds 500 characters');
     if (category.text.trim().isEmpty) problems.add('Item Category is required');
     if (minQty == null || minQty <= 0) problems.add('MOQ must be greater than zero');
     if (price == null || price < 0) problems.add('FOB must be non-negative');
@@ -158,14 +163,45 @@ class _ProductEditPageState extends State<ProductEditPage> {
     if (sizeRange.text.trim().length > 500) problems.add('Size Range exceeds 500 characters');
     if (weightText.text.trim().length > 500) problems.add('Weight exceeds 500 characters');
     if (newImages.length + existingCount > 5) problems.add('Maximum 5 images allowed');
-    // The supplied live NORMAL PUT has no ITEM_CODE/BUYER SET clause.
-    // Avoid telling users these are saved when the API currently ignores them.
-    if (buyer.text.trim() != item.buyer || itemCode.text.trim() != item.itemCode) {
-      problems.add('Buyer and Item Code cannot be changed until the PUT API supports them');
+    // ITEM_CODE remains read-only because the PUT handler does not update it.
+    if (itemCode.text.trim() != item.itemCode) {
+      problems.add('Item Code cannot be changed with the current PUT API');
     }
     if (problems.isNotEmpty) {
       message(problems.join(' • '));
       return;
+    }
+
+    final newBusiness = business.text.trim();
+    final newBuyer = buyer.text.trim();
+    final businessChanged = newBusiness != item.business;
+    final buyerChanged = newBuyer != item.buyer;
+    if (businessChanged) {
+      // Business is a MASTER value, not a detail-level product attribute.
+      // The change affects every product belonging to this same master SL.
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Change Business for this Display Room?'),
+          content: Text(
+            'Business is shared by every product under Master #${item.masterSl}. '
+            'Changing it from "${item.business}" to "$newBusiness" will update '
+            'the Business shown for ALL products in this Display Room. '
+            'Buyer will be updated only for this product. Continue?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Update Business'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
     }
 
     setState(() => saving = true);
@@ -175,7 +211,7 @@ class _ProductEditPageState extends State<ProductEditPage> {
         'mode': 'NORMAL',
         'master_sl': item.masterSl,
         'updated_by': userId,
-        'business': item.business,
+        'business': newBusiness,
         'sub_category': item.subCategory,
         if (item.organizationId != null) 'organization_id': item.organizationId,
         if (item.displayRoomNo.isNotEmpty) 'display_room_no': item.displayRoomNo,
@@ -185,7 +221,7 @@ class _ProductEditPageState extends State<ProductEditPage> {
           'item_code': item.itemCode,
           'description': name.text.trim(),
           'product_category': category.text.trim(),
-          'buyer': item.buyer,
+          'buyer': newBuyer,
           'moq': minQty,
           'fob': price,
           'size_range': sizeRange.text.trim(),
@@ -222,12 +258,77 @@ class _ProductEditPageState extends State<ProductEditPage> {
         final error = data is Map ? data['message'] : response.body;
         throw Exception('HTTP ${response.statusCode}: $error');
       }
+      // Older versions of the PUT handler return HTTP/API 200 even when
+      // silently ignoring details[].buyer. Re-read the saved product whenever
+      // Business or Buyer changed; never report a false save to the user.
+      if (buyerChanged || businessChanged) {
+        await verifyBusinessAndBuyer(
+          expectedBusiness: newBusiness,
+          expectedBuyer: newBuyer,
+          verifyBusiness: businessChanged,
+          verifyBuyer: buyerChanged,
+        );
+      }
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (error) {
       message('Product update failed: $error');
     } finally {
       if (mounted) setState(() => saving = false);
+    }
+  }
+
+  Future<void> verifyBusinessAndBuyer({
+    required String expectedBusiness,
+    required String expectedBuyer,
+    required bool verifyBusiness,
+    required bool verifyBuyer,
+  }) async {
+    final response = await DisplayRoomApiService.getItemsByMasterSl(item.masterSl!);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('PUT completed, but GET verification failed (HTTP '
+          '${response.statusCode}). Refresh the product list before retrying.');
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map || decoded['status_code']?.toString() != '200' ||
+        decoded['data'] is! List) {
+      throw StateError('PUT completed, but GET verification could not read '
+          'the product. Refresh the product list before retrying.');
+    }
+    Map<String, dynamic>? master;
+    for (final raw in decoded['data'] as List) {
+      if (raw is Map && raw['sl']?.toString() == item.masterSl.toString()) {
+        master = Map<String, dynamic>.from(raw);
+        break;
+      }
+    }
+    if (master == null) {
+      throw StateError('Product Master #${item.masterSl} was not returned '
+          'after saving. Refresh before retrying.');
+    }
+    if (verifyBusiness && (master['business']?.toString().trim() ?? '') != expectedBusiness) {
+      throw StateError('PUT returned success, but Business was not saved. '
+          'Verify the deployed PUT handler.');
+    }
+    if (verifyBuyer) {
+      Map<String, dynamic>? detail;
+      final details = master['details'];
+      if (details is List) {
+        for (final raw in details) {
+          if (raw is Map && raw['sl']?.toString() == item.sl.toString()) {
+            detail = Map<String, dynamic>.from(raw);
+            break;
+          }
+        }
+      }
+      if (detail == null) {
+        throw StateError('Product #${item.sl} was not returned after saving. '
+            'Refresh before retrying.');
+      }
+      if ((detail['buyer']?.toString().trim() ?? '') != expectedBuyer) {
+        throw StateError('PUT returned success, but Buyer was NOT saved. '
+            'Deploy the updated PUT handler (BUYER update) before retrying.');
+      }
     }
   }
 
@@ -282,11 +383,13 @@ class _ProductEditPageState extends State<ProductEditPage> {
   Widget build(BuildContext context) {
     final fields = <Widget>[
       input(name, 'Item Name *'),
+      input(business, 'Business *',
+          help: 'Changing Business updates every product in this Display Room.'),
       input(category, 'Item Category *'),
       input(itemCode, 'Item Code', readOnly: true,
           help: 'Read only: current PUT handler does not update ITEM_CODE'),
-      input(buyer, 'Buyer / Client Name', readOnly: true,
-          help: 'Read only: current PUT handler does not update BUYER'),
+      input(buyer, 'Buyer / Client Name',
+          help: 'Editable. Saved to this product after the updated PUT API is deployed.'),
       input(displayRoom, 'Display Room Name'),
       input(sizeRange, 'Size Range / Dimensions (Optional)',
           help: 'Free text, e.g. S-M or 210 X 180 X 115CM'),

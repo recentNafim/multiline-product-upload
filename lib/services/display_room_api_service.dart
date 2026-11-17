@@ -22,6 +22,16 @@ class DisplayRoomApiService {
     headers: const {'Accept': 'application/json'},
   ).timeout(const Duration(seconds: 60));
 
+  // Read back a single master and its details to verify editable fields.
+  static Future<http.Response> getItemsByMasterSl(int masterSl) => http.get(
+    Uri.parse(ApiConstants.listItems).replace(queryParameters: {
+      'p_master_sl': '$masterSl',
+      'p_page': '1',
+      'p_limit': '1',
+    }),
+    headers: const {'Accept': 'application/json'},
+  ).timeout(const Duration(seconds: 60));
+
   static Future<http.Response> getItemsPage({required int page, int limit = 100}) => http.get(
     Uri.parse(ApiConstants.listItems).replace(queryParameters: {
       'p_page': '$page',
