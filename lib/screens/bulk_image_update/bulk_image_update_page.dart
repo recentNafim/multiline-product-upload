@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../../services/display_room_api_service.dart';
+import '../../utils/image_auto_compressor.dart';
 
 /// Bulk replacement of existing product gallery images using IMAGE FILENAMES.
 /// No Excel workbook is needed. Example: 92223337980.jpg -> item 92223337980.
@@ -37,6 +38,7 @@ class _ImageUpdateRow {
 class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
   static const int _maxImageBytes = 10 * 1024 * 1024;
   static const int _maxTotalBytes = 120 * 1024 * 1024;
+  static const int _maxSourceImageBytes = 80 * 1024 * 1024;
   static const int _maxProducts = 300;
   static const int _maxImagesPerProduct = 5;
 
@@ -52,6 +54,7 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
   int _completedProducts = 0;
   int _completedImages = 0;
   String? _pageError;
+  String? _processingMessage;
 
   @override
   void dispose() {
@@ -116,7 +119,7 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
     throw const FormatException('File is not a valid JPEG, PNG or WebP image');
   }
 
-  static void _validatePhoto(PlatformFile file) {
+  static void _validatePhoto(PlatformFile file, {bool checkSize = true}) {
     final name = _baseFilename(file.name);
     final dot = name.lastIndexOf('.');
     final extension = dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
@@ -127,8 +130,8 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
     if (bytes == null || bytes.isEmpty) {
       throw FormatException('$name: could not read the image bytes');
     }
-    if (bytes.length > _maxImageBytes) {
-      throw FormatException('$name: maximum 10 MB per image');
+    if (checkSize && bytes.length > _maxImageBytes) {
+      throw FormatException('$name: image must be compressed below 10 MB');
     }
     final actual = _mimeForImage(bytes);
     final expected = (extension == 'jpg' || extension == 'jpeg')
@@ -136,6 +139,32 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
     if (expected != actual) {
       throw FormatException('$name: extension does not match image content');
     }
+  }
+
+  /// Keep existing images byte-for-byte when they already satisfy the API.
+  /// Oversized images are optimized BEFORE being put in the selection and
+  /// BEFORE the IMAGE_ONLY PUT request is assembled.
+  Future<PlatformFile> _prepareImage(PlatformFile original) async {
+    _validatePhoto(original, checkSize: false);
+    if (original.size <= _maxImageBytes) return original;
+    if (original.size > _maxSourceImageBytes) {
+      throw FormatException('${original.name}: original file exceeds 80 MB; '
+          'please reduce it before selecting');
+    }
+    final bytes = original.bytes!;
+    final mime = _mimeForImage(bytes);
+    final optimized = await optimizeOversizedUploadImage(bytes, mime);
+    final dot = original.name.lastIndexOf('.');
+    final stem = original.name.substring(0, dot);
+    final extension = optimized.mimeType == 'image/jpeg'
+        ? 'jpg' : optimized.mimeType == 'image/webp' ? 'webp' : 'png';
+    final processed = PlatformFile(
+      name: '$stem.$extension',
+      size: optimized.bytes.length,
+      bytes: optimized.bytes,
+    );
+    _validatePhoto(processed);
+    return processed;
   }
 
   /// Build one preview/upload row per distinct code, preserving leading zeros.
@@ -192,12 +221,25 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
       if (picked == null || picked.files.isEmpty) return;
 
       final incoming = <String, PlatformFile>{};
-      for (final file in picked.files) {
-        _itemCodeFromFilename(file.name);
-        _validatePhoto(file);
+      var optimizedCount = 0;
+      for (var index = 0; index < picked.files.length; index++) {
+        final source = picked.files[index];
+        _itemCodeFromFilename(source.name);
+        // Detect duplicates before spending time on image processing.
+        final originalKey = _key(_baseFilename(source.name));
+        if (_filesByName.containsKey(originalKey) || incoming.containsKey(originalKey)) {
+          throw FormatException('Duplicate filename: ${source.name}. Remove it before selecting again.');
+        }
+        if (source.size > _maxImageBytes && mounted) {
+          setState(() => _processingMessage =
+              'Optimizing ${index + 1}/${picked.files.length}: ${source.name}');
+        }
+        final file = await _prepareImage(source);
+        if (source.size > _maxImageBytes) optimizedCount++;
         final filenameKey = _key(_baseFilename(file.name));
         if (_filesByName.containsKey(filenameKey) || incoming.containsKey(filenameKey)) {
-          throw FormatException('Duplicate filename: ${file.name}. Remove it before selecting again.');
+          throw FormatException('Duplicate resulting filename: ${file.name}. '
+              'Use unique __1, __2 ... __5 image suffixes.');
         }
         incoming[filenameKey] = file;
       }
@@ -217,15 +259,21 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
       setState(() {
         _filesByName.addAll(incoming);
         _pageError = null;
+        _processingMessage = null;
         _completedProducts = 0;
         _completedImages = 0;
         _rebuildRows();
       });
-      _toast('${incoming.length} image(s) selected. Please review Item Code matches.');
+      _toast('${incoming.length} image(s) selected'
+          '${optimizedCount > 0 ? ' ($optimizedCount automatically optimized)' : ''}. '
+          'Please review Item Code matches.');
     } catch (error) {
       if (mounted) setState(() => _pageError = error.toString());
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() {
+        _busy = false;
+        _processingMessage = null;
+      });
     }
   }
 
@@ -247,6 +295,7 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
       _completedProducts = 0;
       _completedImages = 0;
       _pageError = null;
+      _processingMessage = null;
     });
   }
 
@@ -589,8 +638,9 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
                   'before the extension. For different products, simply rename '
                   'each file as its exact Item Code. Leading zeros are preserved.'),
               const SizedBox(height: 6),
-              const Text('JPEG / PNG / WebP only • 10 MB per image • maximum 5 per '
-                  'product • 120 MB total • original quality (no compression).'),
+              const Text('JPEG / PNG / WebP only • images over 10 MB are automatically '
+                  'optimized before upload • maximum 5 per product • 120 MB total '
+                  'after optimization • smaller images retain original quality.'),
             ]),
           ),
         ),
@@ -643,6 +693,10 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
         if (_busy) const Padding(
           padding: EdgeInsets.symmetric(vertical: 14),
           child: LinearProgressIndicator(),
+        ),
+        if (_processingMessage != null) Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Text(_processingMessage!),
         ),
         if (_pageError != null) Padding(
           padding: const EdgeInsets.symmetric(vertical: 8),

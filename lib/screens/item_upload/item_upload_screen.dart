@@ -219,6 +219,39 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       files = List<PlatformFile>.from(selectedImages);
     }
 
+    // Oracle's image writer supports JPEG, PNG and WebP only, maximum 10 MB.
+    // Check the actual magic bytes before POST: a .png filename alone does
+    // not guarantee valid image bytes. Otherwise a whole Excel batch may
+    // fail at the last moment (or display an incorrect success banner).
+    for (final file in files) {
+      final bytes = file.bytes;
+      final suffix = file.name.split('.').last.toLowerCase();
+      if (bytes == null || bytes.isEmpty) {
+        showError('Picture ${file.name} has no readable bytes. Upload blocked.');
+        return false;
+      }
+      if (bytes.length > 10 * 1024 * 1024) {
+        showError('Picture ${file.name} exceeds the Oracle 10 MB limit.');
+        return false;
+      }
+      final isJpeg = (suffix == 'jpg' || suffix == 'jpeg') &&
+          bytes.length >= 3 && bytes[0] == 0xff &&
+          bytes[1] == 0xd8 && bytes[2] == 0xff;
+      final isPng = suffix == 'png' && bytes.length >= 8 &&
+          bytes[0] == 0x89 && bytes[1] == 0x50 &&
+          bytes[2] == 0x4e && bytes[3] == 0x47 &&
+          bytes[4] == 0x0d && bytes[5] == 0x0a &&
+          bytes[6] == 0x1a && bytes[7] == 0x0a;
+      final isWebp = suffix == 'webp' && bytes.length >= 12 &&
+          String.fromCharCodes(bytes.sublist(0, 4)) == 'RIFF' &&
+          String.fromCharCodes(bytes.sublist(8, 12)) == 'WEBP';
+      if (!isJpeg && !isPng && !isWebp) {
+        showError('Picture ${file.name} is not a valid JPEG, PNG or WebP. '
+            'The Oracle API does not accept GIF or renamed images.');
+        return false;
+      }
+    }
+
     final issues = <String>[];
     for (final file in files) {
       final resolution = await readImageResolution(file.bytes);
@@ -1138,6 +1171,10 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
           'embedded pictures or choose source images for each product.');
       return;
     }
+    // Restoration must pass the same MIME/signature/size checks as a new POST.
+    // Do not send malformed Base64 or unsupported GIF bytes to IMAGE_ONLY PUT.
+    if (!await _confirmImageQualityBeforeUpload()) return;
+    if (!mounted) return;
     final proceed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -1528,8 +1565,15 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return false;
     }
-    if (decoded is! Map) return true;
+    // An HTTP 200 with HTML/empty text is not a confirmed Oracle commit.
+    // ORDS can return a non-JSON error page while keeping status HTTP 200.
+    if (decoded is! Map) return false;
     final rawStatus = decoded['status_code'] ?? decoded['STATUS_CODE'];
+    final hasExplicitSuccess = rawStatus != null ||
+        decoded['return_status'] != null ||
+        decoded['RETURN_STATUS'] != null ||
+        decoded['success'] == true;
+    if (!hasExplicitSuccess) return false;
     if (rawStatus != null &&
         !{'200', '201', '202', '204', 'S', 'SUCCESS'}
             .contains(rawStatus.toString().trim().toUpperCase())) {
