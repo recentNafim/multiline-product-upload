@@ -37,7 +37,9 @@ class _ImageUpdateRow {
 
 class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
   static const int _maxImageBytes = 10 * 1024 * 1024;
-  static const int _maxTotalBytes = 120 * 1024 * 1024;
+  // IMAGE_ONLY sends one product per PUT; the API has no 120 MiB total-
+  // selection limit. Do not reject otherwise valid selections on that basis.
+  // The existing per-image limit and five-images-per-product guard remain.
   static const int _maxSourceImageBytes = 80 * 1024 * 1024;
   static const int _maxProducts = 300;
   static const int _maxImagesPerProduct = 5;
@@ -45,6 +47,9 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
   final TextEditingController _updatedByController = TextEditingController();
   // Keyed by the original (case-insensitive) filename, NOT the item code.
   final Map<String, PlatformFile> _filesByName = {};
+  int get _selectedBytes =>
+      _filesByName.values.fold<int>(0, (total, file) => total + file.size);
+
   List<_ImageUpdateRow> _rows = [];
   bool _busy = false;
   bool _checked = false;
@@ -243,11 +248,10 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
         }
         incoming[filenameKey] = file;
       }
-      final existingBytes = _filesByName.values.fold<int>(0, (n, p) => n + p.size);
-      final newBytes = incoming.values.fold<int>(0, (n, p) => n + p.size);
-      if (existingBytes + newBytes > _maxTotalBytes) {
-        throw const FormatException('Total selected images must be 120 MB or less');
-      }
+      // Individual images are constrained to 10 MiB and each IMAGE_ONLY PUT
+      // contains just one product (at most five photos). The selected files
+      // are never sent together as a single 120 MiB request; keeping a global
+      // 120 MiB cap here wrongly rejects valid multi-product selections.
       final allCodes = <String>{
         ..._rows.map((r) => _key(r.itemCode)),
         ...incoming.values.map((f) => _key(_itemCodeFromFilename(f.name))),
@@ -639,8 +643,9 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
                   'each file as its exact Item Code. Leading zeros are preserved.'),
               const SizedBox(height: 6),
               const Text('JPEG / PNG / WebP only • images over 10 MB are automatically '
-                  'optimized before upload • maximum 5 per product • 120 MB total '
-                  'after optimization • smaller images retain original quality.'),
+                  'optimized before upload • maximum 5 per product • '
+                  'products uploaded one at a time • smaller images retain '
+                  'original quality.'),
             ]),
           ),
         ),
@@ -660,8 +665,18 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
         ]),
         const SizedBox(height: 12),
         if (_rows.isNotEmpty) Text(
-          '${_filesByName.length} image(s) selected for ${_rows.length} Item Code(s)',
+          '${_filesByName.length} image(s) selected for ${_rows.length} Item Code(s) '
+          '(${(_selectedBytes / (1024 * 1024)).toStringAsFixed(1)} MiB on this device)',
           style: theme.textTheme.titleMedium,
+        ),
+        if (_selectedBytes > 120 * 1024 * 1024) Padding(
+          padding: const EdgeInsets.only(top: 4, bottom: 8),
+          child: Text(
+            'Large selection: images will be uploaded one product at a time. '
+            'Keep this tab open. If the browser becomes slow, choose smaller '
+            'groups of images instead.',
+            style: TextStyle(color: Colors.orange.shade800),
+          ),
         ),
         const SizedBox(height: 12),
         ConstrainedBox(
