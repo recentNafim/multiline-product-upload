@@ -23,13 +23,22 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _submit() async {
-    if (!_formKey.currentState!.validate()) return;
-    await AuthSession.instance.login(
+    if (AuthSession.instance.busy ||
+        !(_formKey.currentState?.validate() ?? false)) {
+      return;
+    }
+
+    final bool signedIn = await AuthSession.instance.login(
       id: _idController.text,
       password: _passwordController.text,
     );
-    // Never retain password after an authentication attempt.
-    if (mounted) _passwordController.clear();
+
+    if (!mounted) return;
+    // Failed login: keep the password so users can see the error and retry.
+    // Successful login: the authenticated screen replaces the login form.
+    if (signedIn) {
+      _passwordController.clear();
+    }
   }
 
   @override
@@ -88,7 +97,8 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
                 if (session.error != null) ...[
                   const SizedBox(height: 14),
-                  Text(session.error!, style: const TextStyle(color: Colors.red)),
+                  SelectableText(session.error!,
+                      style: const TextStyle(color: Colors.red)),
                 ],
                 const SizedBox(height: 22),
                 FilledButton.icon(

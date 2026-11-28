@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -84,13 +85,16 @@ class AuthSession extends ChangeNotifier {
     error = null;
     notifyListeners();
     try {
+      // Call the HTTPS Oracle ORDS login handler directly.
+      // HRIS Authorization/S_KEYL secrets stay on the ORDS server,
+      // never in public Flutter Web / GitHub Pages JavaScript.
       final response = await http.post(
         Uri.parse(ApiConstants.loginUrl),
-        headers: const {
+        headers: const <String, String>{
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
-        body: jsonEncode({'userId': cleanId, 'password': password}),
+        body: jsonEncode({'UserName': cleanId, 'Password': password}),
       ).timeout(const Duration(seconds: 25));
 
       Map<String, dynamic>? data;
@@ -109,23 +113,53 @@ class AuthSession extends ChangeNotifier {
         return true;
       }
 
-      if (response.statusCode == 401 ||
-          (response.statusCode == 200 && data?['isSuccess'] == false)) {
-        error = (data?['message'] as String?) ?? 'Invalid User ID or password.';
+      if (response.statusCode == 200 && data?['isSuccess'] == false) {
+        error = _serverMessage(data) ?? 'Invalid User ID or password.';
+      } else if (response.statusCode == 200) {
+        error = 'Login API returned HTTP 200 but no valid isSuccess value. '
+            'Verify that the ORDS handler returns JSON with isSuccess: true/false.';
+      } else if (response.statusCode == 400) {
+        error = _serverMessage(data) ?? 'Invalid login request (HTTP 400). '
+            'Check the User ID and ORDS login handler.';
+      } else if (response.statusCode == 401) {
+        error = _serverMessage(data) ?? 'Login rejected (HTTP 401). Verify credentials and ORDS endpoint authorization.';
+      } else if (response.statusCode == 403) {
+        error = 'Login denied (HTTP 403). Check ORDS endpoint authorization and browser CORS settings.';
       } else if (response.statusCode == 404) {
-        error = 'ORDS login API not deployed (HTTP 404). Install the supplied SQL handler.';
+        error = 'Login endpoint not found (HTTP 404). '
+            'Deploy the ORDS handler at the configured login URL.';
+      } else if (response.statusCode == 405) {
+        error = 'Login endpoint does not accept POST (HTTP 405). '
+            'Check the ORDS handler method.';
+      } else if (response.statusCode >= 500) {
+        error = _serverMessage(data) ??
+            'Oracle/HRIS login service error (HTTP ${response.statusCode}). '
+            'Check the ORDS logs and APPS.USER_LOGIN_VALIDATION.';
       } else {
         error = 'ORDS login request failed (HTTP ${response.statusCode}). '
-            'Check the API handler and server configuration.';
+            'Check the endpoint and server configuration.';
       }
+    } on TimeoutException {
+      error = 'Login request timed out. Check ORDS/HRIS connectivity.';
+    } on http.ClientException {
+      error = 'Cannot reach the ORDS login API from this browser. '
+          'Check HTTPS, server availability and CORS for Content-Type.';
     } catch (_) {
-      error = 'Cannot reach the HTTPS Oracle ORDS login API. '
-          'Check network access, endpoint deployment and browser CORS settings.';
+      error = 'Unable to complete login. Verify ORDS endpoint, HTTPS and CORS.';
     } finally {
       busy = false;
       notifyListeners();
     }
     return false;
+  }
+
+  static String? _serverMessage(Map<String, dynamic>? data) {
+    final message = data?['message'];
+    if (message is! String) return null;
+    final clean = message.trim();
+    // Never echo potentially sensitive or arbitrarily large server responses.
+    if (clean.isEmpty || clean.length > 180) return null;
+    return clean;
   }
 
   Future<void> logout() async {
