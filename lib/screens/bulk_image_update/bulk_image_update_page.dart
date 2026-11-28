@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../../services/auth_session.dart';
+import '../../widgets/user_session_action.dart';
 
 import '../../services/display_room_api_service.dart';
 import '../../utils/image_auto_compressor.dart';
@@ -60,6 +62,12 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
   int _completedImages = 0;
   String? _pageError;
   String? _processingMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _updatedByController.text = AuthSession.instance.userId ?? '';
+  }
 
   @override
   void dispose() {
@@ -415,7 +423,7 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
 
   Future<void> _updateImages() async {
     if (_busy || !_checked) return;
-    final staffId = int.tryParse(_updatedByController.text.trim());
+    final staffId = AuthSession.instance.staffId;
     if (staffId == null || staffId <= 0) {
       _toast('Enter a valid Updated By / Staff ID first');
       return;
@@ -619,7 +627,8 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
     final conflicts = _rows.where((r) => r.status == 'Conflict' || r.status == 'Not found').length;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Bulk Image Update by Item Code')),
+      appBar: AppBar(title: const Text('Bulk Image Update by Item Code'),
+        actions: const [UserSessionAction()]),
       body: ListView(padding: const EdgeInsets.all(16), children: [
         Text('Upload renamed images — no Excel required',
             style: theme.textTheme.titleLarge),
@@ -683,10 +692,11 @@ class _BulkImageUpdatePageState extends State<BulkImageUpdatePage> {
           constraints: const BoxConstraints(maxWidth: 330),
           child: TextField(
             controller: _updatedByController,
+            readOnly: true,
             enabled: !_busy,
             keyboardType: TextInputType.number,
             decoration: const InputDecoration(
-              labelText: 'Updated By / Staff ID *',
+              labelText: 'Updated By / Logged-in Staff ID',
               border: OutlineInputBorder(),
               helperText: 'Required by the existing PUT API',
             ),

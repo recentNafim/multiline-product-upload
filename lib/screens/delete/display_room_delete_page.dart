@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import '../../widgets/user_session_action.dart';
 import '../../models/delete_models.dart';
 import '../../services/display_room_api_service.dart';
 
@@ -171,6 +172,7 @@ class _DisplayRoomDeletePageState extends State<DisplayRoomDeletePage> {
         p.displayRoomName].any((value) => value.toLowerCase().contains(query))).toList();
     return Scaffold(
       appBar: AppBar(title: const Text('Delete Products'), actions: [
+        const UserSessionAction(),
         IconButton(onPressed: isLoading || deleting ? null : _load,
           icon: const Icon(Icons.refresh)),
       ]),

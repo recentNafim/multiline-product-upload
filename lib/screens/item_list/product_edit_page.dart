@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../../services/auth_session.dart';
+import '../../widgets/user_session_action.dart';
 
 import '../../core/constants/api_constants.dart';
 import '../../models/display_room_item.dart';
@@ -51,8 +53,7 @@ class _ProductEditPageState extends State<ProductEditPage> {
     weightText = TextEditingController(text: item.weightText);
     moq = TextEditingController(text: item.quantity?.toString() ?? '');
     fob = TextEditingController(text: item.fob?.toString() ?? '');
-    updatedBy = TextEditingController(text:
-        (item.updatedBy ?? item.createdBy)?.toString() ?? '');
+    updatedBy = TextEditingController(text: AuthSession.instance.userId ?? '');
     material = TextEditingController(text: item.materialSpecification);
     cbm = TextEditingController(text: item.cbm);
   }
@@ -150,7 +151,7 @@ class _ProductEditPageState extends State<ProductEditPage> {
     }
     final minQty = double.tryParse(moq.text.trim());
     final price = double.tryParse(fob.text.trim());
-    final userId = int.tryParse(updatedBy.text.trim());
+    final userId = AuthSession.instance.staffId;
     final problems = <String>[];
     if (name.text.trim().isEmpty) problems.add('Item Name is required');
     if (business.text.trim().isEmpty) problems.add('Business is required');
@@ -399,10 +400,11 @@ class _ProductEditPageState extends State<ProductEditPage> {
       input(fob, 'FOB *', numeric: true),
       input(cbm, 'CBM'),
       input(material, 'Material Specification'),
-      input(updatedBy, 'Updated By / Staff ID *', numeric: true),
+      input(updatedBy, 'Updated By / Logged-in User', numeric: true, readOnly: true),
     ];
     return Scaffold(
       appBar: AppBar(title: const Text('Edit Product'), actions: [
+        const UserSessionAction(),
         TextButton.icon(
           onPressed: saving ? null : save,
           icon: const Icon(Icons.save_outlined),

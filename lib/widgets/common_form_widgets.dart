@@ -7,9 +7,11 @@ Widget buildTextField({
   TextInputType keyboardType = TextInputType.text,
   int maxLines = 1,
   bool required = true,
+  bool readOnly = false,
   FormFieldValidator<String>? validator,
 }) => TextFormField(
   controller: controller,
+  readOnly: readOnly,
   keyboardType: keyboardType,
   maxLines: maxLines,
   decoration: InputDecoration(

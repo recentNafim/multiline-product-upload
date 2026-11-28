@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../../services/auth_session.dart';
+import '../../widgets/user_session_action.dart';
+import '../../widgets/auth_guard.dart';
 import '../../models/display_room_item.dart';
 import '../../core/constants/api_constants.dart';
 import '../../utils/auto_image_file_name.dart';
@@ -117,7 +120,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
     final category = TextEditingController(text: item.productCategory);
     final buyer = TextEditingController(text: item.buyer);
     final roomName = TextEditingController(text: item.displayRoomName);
-    final updatedBy = TextEditingController(text: (item.updatedBy ?? item.createdBy)?.toString() ?? '');
+    final updatedBy = TextEditingController(text: AuthSession.instance.userId ?? '');
     bool busy = false;
     // Only explicitly deleted image IDs are sent to Oracle.
     final removedImageIds = <int>{};
@@ -187,7 +190,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                 _field(weight, 'Weight (Optional - Free Text)'),
                 _field(moq, 'MOQ', numeric: true),
                 _field(fob, 'FOB', numeric: true),
-                _field(updatedBy, 'Updated By', numeric: true),
+                _field(updatedBy, 'Updated By / Logged-in User', numeric: true, readOnly: true),
                 const SizedBox(height: 6),
                 Align(alignment: Alignment.centerLeft, child: Text(
                   'Product Images (${item.imageRecords.length - removedImageIds.length + newImages.length}/5)',
@@ -330,7 +333,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                     if (item.displayRoomNo.trim().isNotEmpty)
                       'display_room_no': item.displayRoomNo,
                     'display_room_name': roomName.text.trim(),
-                    'updated_by': int.tryParse(updatedBy.text) ?? 0,
+                    'updated_by': AuthSession.instance.staffId,
                     'status': item.status,
                     'assignee': item.assignee,
                     'details': [<String, dynamic>{
@@ -480,9 +483,9 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
     );
   }
 
-  Widget _field(TextEditingController controller, String label, {bool numeric = false}) =>
+  Widget _field(TextEditingController controller, String label, {bool numeric = false, bool readOnly = false}) =>
     Padding(padding: const EdgeInsets.only(bottom: 12), child: TextField(
-      controller: controller, keyboardType: numeric ? TextInputType.number : TextInputType.text,
+      controller: controller, readOnly: readOnly, keyboardType: numeric ? TextInputType.number : TextInputType.text,
       decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
     ));
 
@@ -494,6 +497,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
        p.sizeRange].any((text) => text.toLowerCase().contains(query))).toList();
     return Scaffold(
       appBar: AppBar(title: const Text('Display Room Items'), actions: [
+        const UserSessionAction(),
         IconButton(tooltip: 'Bulk Image Update (By Filename)',
           icon: const Icon(Icons.collections_outlined),
           onPressed: () => Navigator.pushNamed(context, '/bulk-images')),
@@ -529,7 +533,7 @@ class _DisplayRoomItemListPageState extends State<DisplayRoomItemListPage> {
                 trailing: IconButton(tooltip: 'Edit', icon: const Icon(Icons.edit_outlined),
                   onPressed: () async {
                     final updated = await Navigator.of(context).push<bool>(
-                      MaterialPageRoute(builder: (_) => ProductEditPage(product: p)),
+                      MaterialPageRoute(builder: (_) => AuthGuard(child: ProductEditPage(product: p))),
                     );
                     if (updated == true) {
                       _message('Product updated successfully');

@@ -7,6 +7,8 @@ import 'package:http/http.dart' as http;
 
 import '../../core/constants/api_constants.dart';
 import '../../services/display_room_api_service.dart';
+import '../../services/auth_session.dart';
+import '../../widgets/user_session_action.dart';
 import '../../utils/excel_value_utils.dart';
 import '../../utils/excel_style_free_reader.dart';
 import '../../utils/excel_template_download.dart' as template_download;
@@ -25,7 +27,7 @@ class ItemUploadScreen extends StatefulWidget {
 }
 
 class _ItemUploadScreenState extends State<ItemUploadScreen> {
-  static const String apiUrl = ApiConstants.uploadItem;
+  static String get apiUrl => ApiConstants.uploadItem;
 
   final _formKey = GlobalKey<FormState>();
 
@@ -114,6 +116,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   void initState() {
     super.initState();
     statusController.text = 'ACTIVE';
+    createdByController.text = AuthSession.instance.userId ?? '';
   }
 
   // ============================================================
@@ -1159,7 +1162,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
   /// with an existing gallery/primary picture are skipped, never overwritten.
   Future<void> restoreExistingExcelPictures() async {
     if (isLoading || excelDetails.isEmpty) return;
-    final staffId = int.tryParse(createdByController.text.trim());
+    final staffId = AuthSession.instance.staffId;
     if (staffId == null || staffId <= 0) {
       showError('Enter your Staff ID / Created By before restoring pictures.');
       return;
@@ -1545,6 +1548,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
       controller.clear();
     }
     statusController.text = 'ACTIVE';
+    createdByController.text = AuthSession.instance.userId ?? '';
     setState(() {
       selectedExcelName = null;
       embeddedExcelPictureCount = 0;
@@ -1601,7 +1605,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     if (businessController.text.trim().isEmpty) {
       errors.add('Business is required.');
     }
-    final staffText = createdByController.text.trim();
+    final staffText = AuthSession.instance.userId ?? '';
     final staffId = int.tryParse(staffText);
     if (staffId == null || staffId <= 0) {
       errors.add('Staff ID (Created By) is required and must be a positive number.');
@@ -1671,7 +1675,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
     );
 
     final createdBy = int.tryParse(
-      createdByController.text.trim(),
+      AuthSession.instance.userId ?? '',
     );
 
     final assignee = int.tryParse(
@@ -2802,6 +2806,7 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
               color: Colors.redAccent,
             ),
           ),
+          const UserSessionAction(),
           const SizedBox(width: 8),
         ],
       ),
@@ -2960,8 +2965,9 @@ class _ItemUploadScreenState extends State<ItemUploadScreen> {
                     },
                   ),
                   second: buildTextField(
-                    label: 'Staff ID (Created By)',
-                    hint: 'Required: e.g. 506618',
+                    label: 'Staff ID (Created By • Logged In)',
+                    hint: 'Filled from HRIS login',
+                    readOnly: true,
                     controller:
                     createdByController,
                     keyboardType:
